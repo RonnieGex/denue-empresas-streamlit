@@ -1,9 +1,0 @@
-streamlit
-pandas
-folium
-streamlit-folium
-openpyxl
-openai
-anthropic
-matplotlib
-plotly
