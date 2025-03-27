@@ -1,166 +1,318 @@
-
 import streamlit as st
 import pandas as pd
 import folium
+import re
 from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
-import plotly.express as px
 from openai import OpenAI
+import plotly.express as px
+from io import StringIO
 
-# Configuración de DeepSeek como único proveedor
-def get_recommendations_deepseek(api_key, prompt):
-    try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.deepseek.com/v1"
-        )
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "Eres un experto en giros de negocio y optimización B2B para campañas de Google Ads."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.5,
-            max_tokens=500
-        )
-        return response.choices[0].message.content if response.choices else "❌ No se recibió respuesta válida."
-    except Exception as e:
-        return f"❌ Error al conectar con DeepSeek: {str(e)}"
-
-def mostrar_metricas(df_filtrado):
-    st.markdown("## 📊 Métricas y análisis de la base filtrada")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total de empresas", len(df_filtrado))
-    if "per_ocu_estimado" in df_filtrado.columns and not df_filtrado["per_ocu_estimado"].empty:
-        col2.metric("Promedio de empleados", round(df_filtrado["per_ocu_estimado"].mean(), 2))
-    else:
-        col2.metric("Promedio de empleados", "N/A")
-    contacto_cols = [col for col in ["telefono", "correoelec"] if col in df_filtrado.columns]
-    if contacto_cols:
-        col3.metric("Empresas con contacto", df_filtrado[contacto_cols].dropna(how="all").shape[0])
-    else:
-        col3.metric("Empresas con contacto", "N/A")
-    if "nombre_act" in df_filtrado.columns:
-        top_giros = df_filtrado["nombre_act"].value_counts().nlargest(5).reset_index()
-        top_giros.columns = ["Giro", "Cantidad"]
-        fig = px.bar(top_giros, x="Giro", y="Cantidad", title="📈 Top 5 Giros Económicos en tu Filtro")
-        st.plotly_chart(fig, use_container_width=True)
-
-st.set_page_config(page_title="Katalis Ads DB Optimizer Pro", layout="wide")
+# Configuración inicial
+st.set_page_config(
+    page_title="Katalis Ads DB Optimizer Pro",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 st.title("🚀 Katalis Ads DB Optimizer Pro")
+st.markdown("""
+    Optimiza tu base de datos con filtros avanzados. 
+    **Características principales:**  
+    ✅ Análisis predictivo de segmentación  
+    ✅ Recomendaciones de IA integradas  
+    ✅ Visualización geoespacial avanzada  
+    ✅ Exportación inteligente de datos  
+""")
 
-@st.cache_data
+# Constantes
+COLUMNAS_REQUERIDAS = [
+    'nom_estab', 'nombre_act', 'per_ocu', 'telefono', 'correoelec', 'www',
+    'municipio', 'localidad', 'entidad', 'latitud', 'longitud'
+]
+COLUMNAS_RENOMBRAR = {
+    'nom_estab': 'Nombre',
+    'nombre_act': 'Giro',
+    'per_ocu': 'Personal (texto)',
+    'per_ocu_estimado': 'Personal Estimado',
+    'telefono': 'Teléfono',
+    'correoelec': 'Correo',
+    'www': 'Web',
+    'municipio': 'Municipio',
+    'localidad': 'Localidad',
+    'entidad': 'Estado',
+    'latitud': 'Latitud',
+    'longitud': 'Longitud'
+}
+
+@st.cache_data(show_spinner="Cargando y procesando datos...")
 def cargar_datos(archivo):
-    if archivo.name.endswith(".csv"):
-        df = pd.read_csv(archivo, encoding="latin1", low_memory=False)
-    else:
-        df = pd.read_excel(archivo)
-    df.columns = df.columns.str.strip()
-    return df
+    try:
+        if archivo.name.endswith(".csv"):
+            # Intenta primero con UTF-8
+            try:
+                df = pd.read_csv(archivo, encoding='utf-8', low_memory=False)
+            except UnicodeDecodeError:
+                df = pd.read_csv(archivo, encoding='latin1', low_memory=False)
+        else:
+            df = pd.read_excel(archivo)
+        
+        # Normalización de datos
+        df.columns = df.columns.str.strip().str.lower()
+        df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+        return df
+    except Exception as e:
+        st.error(f"Error al cargar el archivo: {str(e)}")
+        st.stop()
 
 def estimar_empleados(valor):
     if pd.isna(valor):
         return None
+    
     valor = str(valor).lower()
-    if "a" in valor:
-        partes = valor.split("a")
-        try:
-            return (int(partes[0].strip()) + int(partes[1].strip().split()[0])) // 2
-        except:
-            return None
-    elif "menos de" in valor:
-        try:
-            return int(valor.split("menos de")[1].strip().split()[0]) - 1
-        except:
-            return None
-    elif "más de" in valor:
-        try:
-            return int(valor.split("más de")[1].strip().split()[0]) + 1
-        except:
-            return None
-    else:
-        try:
-            return int(valor.strip())
-        except:
-            return None
+    patterns = {
+        'range': r'(\d+)\s*a\s*(\d+)',
+        'less_than': r'menos de\s*(\d+)',
+        'more_than': r'más de\s*(\d+)',
+        'single': r'^\d+$'
+    }
+    
+    try:
+        # Rango (ej. 10 a 50)
+        if match := re.search(patterns['range'], valor):
+            min_val, max_val = map(int, match.groups())
+            return (min_val + max_val) // 2
+        
+        # Menos de X
+        if match := re.search(patterns['less_than'], valor):
+            return int(match.group(1)) - 1
+        
+        # Más de X
+        if match := re.search(patterns['more_than'], valor):
+            return int(match.group(1)) + 1
+        
+        # Valor único
+        if match := re.search(patterns['single'], valor):
+            return int(match.group())
+        
+        return None
+    except (ValueError, AttributeError):
+        return None
 
-archivo = st.file_uploader("📂 Sube tu archivo del sistema (.csv o .xlsx)", type=["csv", "xlsx"])
-if archivo:
+@st.cache_data(ttl=3600, max_entries=10)
+def get_recommendations_deepseek(api_key, prompt):
+    try:
+        if not api_key.startswith('ds-'):
+            return [{'type': 'error', 'content': 'Formato de API Key inválido'}]
+        
+        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": """
+                    Eres un experto en segmentación de mercado para campañas B2B en Google Ads. 
+                    Proporciona recomendaciones prácticas y específicas basadas en los datos proporcionados.
+                """},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
+        
+        return [
+            {'type': 'success', 'content': line.strip()} 
+            for line in response.choices[0].message.content.splitlines() 
+            if line.strip()
+        ]
+    except Exception as e:
+        return [{'type': 'error', 'content': f'Error en la conexión: {str(e)}'}]
+
+def mostrar_metricas(df):
+    st.markdown("## 📊 Panel de Analítica Avanzada")
+    
+    cols = st.columns([2, 1, 1])
+    with cols[0]:
+        st.markdown("### Distribución de Empleados")
+        if df['Personal Estimado'].notna().any():
+            fig = px.histogram(
+                df, 
+                x='Personal Estimado',
+                nbins=20,
+                title='Distribución de Tamaño de Empresas'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No hay datos suficientes de empleados para mostrar")
+    
+    metric_cols = cols[1:]
+    metric_data = {
+        'Total Empresas': len(df),
+        'Contacto Completo': df[['Teléfono', 'Correo']].dropna().shape[0],
+        'Promedio Empleados': df['Personal Estimado'].mean(skipna=True),
+        'Presencia Web': df['Web'].notna().sum()
+    }
+    
+    for (name, value), col in zip(metric_data.items(), metric_cols):
+        col.metric(
+            label=name,
+            value=f"{value:,.0f}" if isinstance(value, (int, float)) else value,
+            delta=None
+        )
+
+def validar_coordenadas(lat, lon):
+    try:
+        lat = float(lat)
+        lon = float(lon)
+        return -90 <= lat <= 90 and -180 <= lon <= 180
+    except (ValueError, TypeError):
+        return False
+
+# Interfaz de usuario principal
+def main():
+    archivo = st.file_uploader(
+        "📂 Sube tu archivo del sistema (.csv o .xlsx)",
+        type=["csv", "xlsx"],
+        help="El archivo debe contener columnas específicas del DENUE"
+    )
+    
+    if not archivo:
+        st.info("👉 Por favor sube un archivo para comenzar el análisis")
+        return
+    
     df = cargar_datos(archivo)
-    columnas_necesarias = ["nom_estab", "nombre_act", "per_ocu", "telefono", "correoelec", "www", "municipio", "localidad", "entidad", "latitud", "longitud"]
-    if not all(col in df.columns for col in columnas_necesarias):
-        st.error("❌ El archivo no contiene todas las columnas necesarias.")
-    else:
+    
+    # Validación de columnas
+    missing_cols = [col for col in COLUMNAS_REQUERIDAS if col not in df.columns]
+    if missing_cols:
+        st.error(f"""
+            ❌ Estructura de archivo incompleta. 
+            Columnas faltantes: {', '.join(missing_cols)}
+        """)
+        st.stop()
+    
+    # Preprocesamiento
+    with st.spinner("Procesando datos..."):
         df = df.dropna(subset=["entidad", "municipio", "nombre_act"])
         df["per_ocu_estimado"] = df["per_ocu"].apply(estimar_empleados)
-        estados = sorted(df["entidad"].dropna().unique())
-        with st.form("form_filtros"):
-            st.subheader("🎯 Filtros avanzados")
-            estado = st.selectbox("📍 Estado", estados)
-            df_estado = df[df["entidad"] == estado]
-            municipios = sorted(df_estado["municipio"].dropna().unique())
-            municipios_sel = st.multiselect("🏘️ Municipios", municipios, default=municipios)
-            tipo_negocio = st.text_input("✍️ Describe tu tipo de negocio")
-            api_key = st.text_input("🔐 Ingresa tu API Key de DeepSeek", type="password")
-            obtener_sugerencias = st.form_submit_button("🤖 Obtener giros sugeridos")
-            if obtener_sugerencias and tipo_negocio and api_key:
-                prompt = f"Dame 5 giros económicos ideales para un negocio que se dedica a: {tipo_negocio}. Devuélvelos en una lista simple."
-                sugerencias = get_recommendations_deepseek(api_key, prompt)
-                st.markdown("### 🎯 Sugerencias de giros:")
-                st.write(sugerencias)
+        df = df.rename(columns=COLUMNAS_RENOMBRAR)
+        df['Coordenadas Validas'] = df.apply(
+            lambda x: validar_coordenadas(x['Latitud'], x['Longitud']), 
+            axis=1
+        )
 
-        st.subheader("🗂️ Aplicar filtros y ver resultados")
-        giros = sorted(df_estado["nombre_act"].dropna().unique())
-        giros_sel = st.multiselect("🏢 Giros económicos", giros)
-        emp_validos = df_estado["per_ocu_estimado"].dropna().astype(int)
-        min_emp = int(emp_validos.min()) if not emp_validos.empty else 0
-        max_emp = int(emp_validos.max()) if not emp_validos.empty else 100
-        rango_emp = st.slider("👥 Rango de empleados (estimado)", min_emp, max_emp, (min_emp, max_emp))
-        nombre_busqueda = st.text_input("🔎 Buscar palabra clave en nombre del negocio")
-        col1, col2, col3 = st.columns(3)
-        con_tel = col1.checkbox("📞 Solo con teléfono")
-        con_mail = col2.checkbox("📧 Solo con correo electrónico")
-        con_web = col3.checkbox("🌐 Solo con sitio web")
-
-        filtrado = df_estado[df_estado["municipio"].isin(municipios_sel)]
-        filtrado = filtrado[filtrado["per_ocu_estimado"].between(rango_emp[0], rango_emp[1])]
-        if giros_sel:
-            filtrado = filtrado[filtrado["nombre_act"].isin(giros_sel)]
-        if nombre_busqueda:
-            filtrado = filtrado[filtrado["nom_estab"].str.lower().str.contains(nombre_busqueda.lower())]
-        if con_tel:
-            filtrado = filtrado[filtrado["telefono"].notna()]
-        if con_mail:
-            filtrado = filtrado[filtrado["correoelec"].notna()]
-        if con_web:
-            filtrado = filtrado[filtrado["www"].notna()]
+    # Sidebar de filtros
+    with st.sidebar:
+        st.header("⚙️ Parámetros de Filtrado")
+        estado = st.selectbox("Seleccionar Estado", sorted(df['Estado'].unique()))
         
-        columnas_exportar = ["nom_estab", "nombre_act", "per_ocu", "per_ocu_estimado", "telefono", "correoelec", "www", "municipio", "localidad", "entidad", "latitud", "longitud"]
-        df_final = filtrado[columnas_exportar].copy()
-        df_final.columns = ["Nombre", "Giro", "Personal (texto)", "Personal Estimado", "Teléfono", "Correo", "Web", "Municipio", "Localidad", "Estado", "Latitud", "Longitud"]
-        st.success(f"✅ Empresas encontradas: {len(df_final)}")
+        df_filtrado = df[df['Estado'] == estado]
+        municipios = st.multiselect(
+            "Seleccionar Municipios",
+            options=sorted(df_filtrado['Municipio'].unique()),
+            default=sorted(df_filtrado['Municipio'].unique())[:3]
+        )
+        
+        st.divider()
+        with st.expander("Filtros Avanzados"):
+            rango_empleados = st.slider(
+                "Rango de Empleados",
+                min_value=int(df['Personal Estimado'].min()),
+                max_value=int(df['Personal Estimado'].max()),
+                value=(10, 100)
+            )
+            
+            contacto_cols = st.columns(3)
+            con_tel = contacto_cols[0].checkbox("Teléfono", True)
+            con_mail = contacto_cols[1].checkbox("Email", True)
+            con_web = contacto_cols[2].checkbox("Sitio Web")
 
-        limite = st.slider("🔢 ¿Cuántos resultados mostrar?", 10, min(500, len(df_final)), 50)
-        st.dataframe(df_final.head(limite), use_container_width=True)
-        csv = df_final.to_csv(index=False).encode("utf-8")
-        st.download_button("📥 Descargar CSV optimizado", csv, file_name="denue_opt.csv", mime="text/csv")
+    # Filtrado principal
+    df_filtrado = df_filtrado[
+        (df_filtrado['Municipio'].isin(municipios)) &
+        (df_filtrado['Personal Estimado'].between(*rango_empleados)) &
+        (df_filtrado['Coordenadas Validas'])
+    ]
+    
+    if con_tel:
+        df_filtrado = df_filtrado[df_filtrado['Teléfono'].notna()]
+    if con_mail:
+        df_filtrado = df_filtrado[df_filtrado['Correo'].notna()]
+    if con_web:
+        df_filtrado = df_filtrado[df_filtrado['Web'].notna()]
 
-        mostrar_metricas(df_final)
-
-        if not df_final[["Latitud", "Longitud"]].dropna().empty:
-            st.subheader("🗺️ Mapa interactivo")
-            max_puntos = st.slider("🔘 Máximo de puntos en mapa", 10, 500, 300)
-            df_mapa = df_final.dropna(subset=["Latitud", "Longitud"]).head(max_puntos)
-            mapa = folium.Map(location=[
-                df_mapa["Latitud"].astype(float).mean(),
-                df_mapa["Longitud"].astype(float).mean()
-            ], zoom_start=11)
+    # Visualización de datos
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f"### 📍 Mapa de Distribución - {estado}")
+        if not df_filtrado.empty:
+            mapa = folium.Map(
+                location=[
+                    df_filtrado['Latitud'].mean(),
+                    df_filtrado['Longitud'].mean()
+                ],
+                zoom_start=10,
+                tiles='cartodbpositron'
+            )
             cluster = MarkerCluster().add_to(mapa)
-            for _, row in df_mapa.iterrows():
+            
+            for _, row in df_filtrado.iterrows():
                 folium.Marker(
-                    location=[float(row["Latitud"]), float(row["Longitud"])],
-                    popup=f"{row['Nombre']}<br>{row['Giro']}"
+                    location=[row['Latitud'], row['Longitud']],
+                    popup=f"""
+                        <b>{row['Nombre']}</b><br>
+                        {row['Giro']}<br>
+                        Empleados: {row['Personal Estimado']}
+                    """,
+                    tooltip=row['Nombre']
                 ).add_to(cluster)
-            st_folium(mapa, height=500, width=900)
+            
+            st_folium(mapa, height=600, width=800)
         else:
-            st.info("No hay coordenadas disponibles para mostrar el mapa.")
+            st.warning("No hay datos para mostrar en el mapa con los filtros actuales")
+    
+    with col2:
+        st.markdown("### 🔍 Vista Previa de Datos")
+        st.dataframe(
+            df_filtrado.head(100),
+            use_container_width=True,
+            height=600,
+            column_config={
+                "Coordenadas Validas": st.column_config.Column(disabled=True)
+            }
+        )
+        
+        csv = df_filtrado.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Exportar Dataset Filtrado",
+            data=csv,
+            file_name='dataset_filtrado.csv',
+            mime='text/csv'
+        )
+
+    # Sección de analítica
+    mostrar_metricas(df_filtrado)
+    
+    # Integración con IA
+    st.divider()
+    with st.expander("🧠 Asistente de Segmentación con IA", expanded=True):
+        api_key = st.text_input("Clave API DeepSeek", type="password")
+        consulta_ia = st.text_area("Describe tu objetivo de campaña")
+        
+        if st.button("Generar Recomendaciones"):
+            if not api_key or not consulta_ia:
+                st.warning("Por favor completa ambos campos")
+                return
+                
+            with st.spinner("Analizando con IA..."):
+                recomendaciones = get_recommendations_deepseek(
+                    api_key,
+                    f"{consulta_ia}. Basado en el dataset: {df_filtrado.describe()}"
+                )
+                
+                for item in recomendaciones:
+                    if item['type'] == 'error':
+                        st.error(item['content'])
+                    else:
+                        st.success(f"✅ {item['content']}")
+
+if __name__ == "__main__":
+    main()
