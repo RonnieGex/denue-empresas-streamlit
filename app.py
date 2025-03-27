@@ -4,21 +4,22 @@ import pandas as pd
 import folium
 import re
 import unicodedata
-from folium.plugins import MarkerCluster
+from folium.plugins import FastMarkerCluster
 from streamlit_folium import st_folium
 from openai import OpenAI
 import plotly.express as px
+from io import BytesIO
 
 # Configuración inicial
 st.set_page_config(
-    page_title="Katalis Ads DB Optimizer Pro",
+    page_title="Katalis Ads DB Optimizer AI",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    page_icon="🚀"
 )
-st.title("🚀 Katalis Ads DB Optimizer Pro")
 
-# Constantes y mapeos
-COLUMNAS_REQUERIDAS = {
+# Constantes
+REQUIRED_COLUMNS = {
     'nom_estab': ['nombre', 'establecimiento', 'empresa'],
     'nombre_act': ['giro', 'actividad', 'rubro'],
     'per_ocu': ['empleados', 'personal', 'trabajadores'],
@@ -32,7 +33,7 @@ COLUMNAS_REQUERIDAS = {
     'longitud': ['lon', 'long']
 }
 
-COLUMNAS_RENOMBRAR = {
+COLUMN_NAMES_MAP = {
     'nom_estab': 'Nombre',
     'nombre_act': 'Giro',
     'per_ocu': 'Personal (texto)',
@@ -47,46 +48,56 @@ COLUMNAS_RENOMBRAR = {
     'longitud': 'Longitud'
 }
 
-# Funciones auxiliares
-def normalizar_nombres(columna):
-    columna = unicodedata.normalize('NFKD', columna).encode('ASCII', 'ignore').decode('utf-8')
-    return columna.lower().strip().replace(' ', '_')
+# Funciones base
+def normalize_column_name(col_name):
+    """Normaliza nombres de columnas para matching flexible"""
+    nfkd = unicodedata.normalize('NFKD', str(col_name))
+    return ''.join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip().replace(' ', '_')
 
-@st.cache_data
-def cargar_datos(archivo):
+@st.cache_data(ttl=3600, show_spinner="Optimizando carga de datos...")
+def load_data(uploaded_file):
+    """Carga y preprocesa datos con optimización de memoria"""
     try:
-        if archivo.name.endswith(".csv"):
-            df = pd.read_csv(archivo, encoding='latin1', low_memory=False)
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, encoding='latin1', low_memory=False)
         else:
-            df = pd.read_excel(archivo)
+            df = pd.read_excel(uploaded_file)
         
-        df.columns = [normalizar_nombres(col) for col in df.columns]
+        # Optimización de tipos de datos
+        for col in df.select_dtypes(include=['object']):
+            df[col] = df[col].astype('string')
+            
         return df
     except Exception as e:
-        st.error(f"Error al cargar el archivo: {str(e)}")
+        st.error(f"Error crítico: {str(e)}")
         st.stop()
 
-def mapear_columnas(df):
-    st.markdown("### 🔍 Mapeo de Columnas Requeridas")
-    st.write("Asigna cada columna de tu archivo a las requeridas por el sistema:")
+def map_columns_interactive(df):
+    """Interfaz interactiva para mapeo de columnas"""
+    st.markdown("### 🔍 Mapeo de Columnas")
+    help_text = "Selecciona qué columna de tu archivo corresponde a cada campo requerido:"
     
-    mapeo = {}
-    for col_requerida, alternativas in COLUMNAS_REQUERIDAS.items():
-        columnas_posibles = [c for c in df.columns if c in alternativas + [col_requerida]]
-        default = columnas_posibles[0] if columnas_posibles else None
-        mapeo[col_requerida] = st.selectbox(
-            f"{col_requerida} (puede ser: {', '.join(alternativas)})",
-            options=[''] + list(df.columns),
-            index=df.columns.get_loc(default) + 1 if default else 0,
-            key=f"map_{col_requerida}"
-        )
-    return mapeo
+    col_mapping = {}
+    with st.expander("Configurar mapeo de columnas", expanded=True):
+        st.caption(help_text)
+        
+        for target_col, possible_names in REQUIRED_COLUMNS.items():
+            matching_cols = [col for col in df.columns if col in possible_names + [target_col]]
+            default = matching_cols[0] if matching_cols else None
+            
+            col_mapping[target_col] = st.selectbox(
+                label=f"{target_col.replace('_', ' ').title()} ({', '.join(possible_names)})",
+                options=[''] + list(df.columns),
+                index=df.columns.get_loc(default) + 1 if default else 0,
+                key=f"colmap_{target_col}"
+            )
+    return col_mapping
 
-def estimar_empleados(valor):
-    if pd.isna(valor):
-        return None
+def estimate_employees(value):
+    """Estimación optimizada de empleados usando regex vectorizado"""
+    if pd.isna(value): return None
+    str_val = str(value).lower()
     
-    valor = str(valor).lower()
     patterns = {
         'range': r'(\d+)\s*a\s*(\d+)',
         'less_than': r'menos de\s*(\d+)',
@@ -95,149 +106,173 @@ def estimar_empleados(valor):
     }
     
     try:
-        if match := re.search(patterns['range'], valor):
-            min_val, max_val = map(int, match.groups())
-            return (min_val + max_val) // 2
-        if match := re.search(patterns['less_than'], valor):
-            return int(match.group(1)) - 1
-        if match := re.search(patterns['more_than'], valor):
-            return int(match.group(1)) + 1
-        if match := re.search(patterns['single'], valor):
-            return int(match.group())
+        if re.search(patterns['range'], str_val):
+            nums = list(map(int, re.findall(r'\d+', str_val)))
+            return sum(nums) // len(nums)
+        if re.search(patterns['less_than'], str_val):
+            return int(re.search(r'\d+', str_val).group()) - 1
+        if re.search(patterns['more_than'], str_val):
+            return int(re.search(r'\d+', str_val).group()) + 1
+        if re.search(patterns['single'], str_val):
+            return int(str_val)
         return None
-    except (ValueError, AttributeError):
+    except:
         return None
 
-@st.cache_data(ttl=3600)
-def get_recommendations_deepseek(api_key, prompt):
-    try:
-        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "Eres un experto en segmentación de mercado para campañas B2B en Google Ads."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=500
-        )
-        return [line.strip() for line in response.choices[0].message.content.splitlines() if line.strip()]
-    except Exception as e:
-        return [f"❌ Error: {str(e)}"]
-
-def mostrar_metricas(df):
-    st.markdown("## 📊 Panel de Analítica")
-    cols = st.columns(4)
+# Componentes UI
+def show_data_summary(df):
+    """Muestra métricas clave en tiempo real"""
+    st.markdown("## 📈 Análisis Instantáneo")
     
-    metricas = {
-        'Total Empresas': len(df),
-        'Prom. Empleados': df['Personal Estimado'].mean(),
-        'Con Contacto': df[['Teléfono', 'Correo']].dropna(how='all').shape[0],
-        'Con Web': df['Web'].notna().sum()
+    cols = st.columns(4)
+    metrics = {
+        '🏢 Empresas': len(df),
+        '👥 Empleados (prom)': df['Personal Estimado'].mean(),
+        '📞 Con teléfono': df['Teléfono'].count(),
+        '🌐 Con sitio web': df['Web'].count()
     }
     
-    for (nombre, valor), col in zip(metricas.items(), cols):
-        col.metric(nombre, f"{valor:,.0f}" if isinstance(valor, float) else valor)
+    for (label, value), col in zip(metrics.items(), cols):
+        col.metric(label, f"{value:,.0f}" if isinstance(value, float) else value)
+
+def create_interactive_map(df):
+    """Crea mapa interactivo optimizado"""
+    st.markdown("## 🌍 Mapa de Concentración Empresarial")
+    
+    if df.empty:
+        st.warning("No hay datos para mostrar en el mapa")
+        return
+    
+    map_center = [df['Latitud'].mean(), df['Longitud'].mean()]
+    
+    with st.spinner("Renderizando mapa..."):
+        m = folium.Map(location=map_center, zoom_start=12, tiles='cartodbpositron')
+        FastMarkerCluster(data=df[['Latitud', 'Longitud']].values.tolist()).add_to(m)
+        st_folium(m, width=1200, height=600)
 
 # Flujo principal
 def main():
-    archivo = st.file_uploader("📂 Sube tu archivo (.csv o .xlsx)", type=["csv", "xlsx"])
+    # Header
+    st.title("🚀 Katalis Ads DB Optimizer AI")
+    st.markdown("""
+        **Herramienta todo-en-uno para segmentación inteligente de bases empresariales**  
+        Carga, filtra y optimiza tus datos para campañas B2B con tecnología AI
+    """)
     
-    if not archivo:
-        st.info("👉 Sube un archivo para comenzar")
+    # Paso 1: Carga de datos
+    uploaded_file = st.file_uploader("Sube tu archivo DENUE", type=["csv", "xlsx"], 
+                                   help="El archivo debe contener datos empresariales en formato estándar")
+    
+    if not uploaded_file:
+        st.info("👋 ¡Comienza subiendo tu archivo!")
         return
     
-    df = cargar_datos(archivo)
+    # Procesamiento inicial
+    with st.spinner("Analizando estructura de datos..."):
+        raw_df = load_data(uploaded_file)
+        raw_df.columns = [normalize_column_name(col) for col in raw_df.columns]
     
-    with st.expander("🔍 Ver estructura del archivo"):
-        st.write("Columnas detectadas:", df.columns.tolist())
+    # Mapeo de columnas
+    st.markdown("## 🔄 Configuración de Campos")
+    column_mapping = map_columns_interactive(raw_df)
     
-    mapeo = mapear_columnas(df)
-    
-    if not all(mapeo.values()):
-        st.error("Debes mapear todas las columnas requeridas")
+    if not all(column_mapping.values()):
+        st.error("⚠️ Configura todas las columnas requeridas para continuar")
         return
     
-    try:
-        df = df.rename(columns={v: k for k, v in mapeo.items() if v})[COLUMNAS_REQUERIDAS.keys()]
-        df = df.rename(columns=COLUMNAS_RENOMBRAR)
-        df['Personal Estimado'] = df['Personal (texto)'].apply(estimar_empleados)
-        df['Coordenadas Validas'] = df.apply(lambda x: abs(x['Latitud']) <= 90 and abs(x['Longitud']) <= 180, axis=1)
-    except Exception as e:
-        st.error(f"Error procesando datos: {str(e)}")
-        return
+    # Transformación de datos
+    with st.spinner("Aplicando transformaciones..."):
+        try:
+            df = raw_df.rename(columns={v:k for k,v in column_mapping.items()})[list(REQUIRED_COLUMNS.keys())]
+            df = df.rename(columns=COLUMN_NAMES_MAP)
+            df['Personal Estimado'] = df['Personal (texto)'].apply(estimate_employees)
+            df = df.dropna(subset=['Estado', 'Municipio', 'Giro'])
+        except Exception as e:
+            st.error(f"Error transformando datos: {str(e)}")
+            return
     
-    # Filtros en sidebar
-    with st.sidebar:
-        st.header("⚙️ Filtros")
-        estado = st.selectbox("Estado", sorted(df['Estado'].unique()))
-        municipios = st.multiselect("Municipios", sorted(df[df['Estado'] == estado]['Municipio'].unique()))
-        rango_emp = st.slider("Rango de empleados", 
-                             int(df['Personal Estimado'].min()), 
-                             int(df['Personal Estimado'].max()), 
-                             (10, 100))
+    # Filtros interactivos
+    st.markdown("## 🎯 Filtros Avanzados")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_state = st.selectbox("Estado", options=sorted(df['Estado'].unique()))
+        municipalities = df[df['Estado'] == selected_state]['Municipio'].unique()
+        selected_municipalities = st.multiselect("Municipios", options=sorted(municipalies),
+                                               default=sorted(municipalies)[:3])
         
-        st.divider()
-        with st.expander("Opciones avanzadas"):
-            con_tel = st.checkbox("Solo con teléfono")
-            con_email = st.checkbox("Solo con email")
-            con_web = st.checkbox("Solo con web")
-
+    with col2:
+        min_emp, max_emp = int(df['Personal Estimado'].min()), int(df['Personal Estimado'].max())
+        emp_range = st.slider("Rango de empleados", min_emp, max_emp, (min_emp, max_emp))
+        keyword_filter = st.text_input("Buscar en nombres de empresas")
+    
     # Aplicar filtros
-    df_filtrado = df[
-        (df['Estado'] == estado) &
-        (df['Municipio'].isin(municipios)) &
-        (df['Personal Estimado'].between(*rango_emp)) &
-        (df['Coordenadas Validas'])
+    filtered_df = df[
+        (df['Estado'] == selected_state) &
+        (df['Municipio'].isin(selected_municipalities)) &
+        (df['Personal Estimado'].between(*emp_range))
     ]
     
-    if con_tel:
-        df_filtrado = df_filtrado[df_filtrado['Teléfono'].notna()]
-    if con_email:
-        df_filtrado = df_filtrado[df_filtrado['Correo'].notna()]
-    if con_web:
-        df_filtrado = df_filtrado[df_filtrado['Web'].notna()]
-
-    # Visualización
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.markdown(f"### 🗺️ Mapa de {estado}")
-        if not df_filtrado.empty:
-            mapa = folium.Map(
-                location=[df_filtrado['Latitud'].mean(), df_filtrado['Longitud'].mean()],
-                zoom_start=10
-            )
-            MarkerCluster().add_to(mapa)
-            for _, row in df_filtrado.iterrows():
-                folium.Marker(
-                    [row['Latitud'], row['Longitud']],
-                    popup=f"{row['Nombre']}<br>{row['Giro']}"
-                ).add_to(mapa)
-            st_folium(mapa, width=700, height=500)
-        else:
-            st.warning("No hay datos para mostrar")
-
-    with col2:
-        st.markdown("### 📋 Vista previa")
-        st.dataframe(df_filtrado.head(100), height=500)
-        csv = df_filtrado.to_csv(index=False).encode('utf-8')
-        st.download_button("Descargar datos filtrados", csv, "datos_filtrados.csv")
-
-    mostrar_metricas(df_filtrado)
+    if keyword_filter:
+        filtered_df = filtered_df[filtered_df['Nombre'].str.contains(keyword_filter, case=False)]
     
-    # Sección IA
-    st.divider()
-    with st.expander("🤖 Asistente de Marketing con IA"):
-        api_key = st.text_input("DeepSeek API Key", type="password")
-        consulta = st.text_area("Describe tu campaña")
-        if st.button("Generar recomendaciones") and api_key and consulta:
-            with st.spinner("Analizando..."):
-                recomendaciones = get_recommendations_deepseek(
-                    api_key,
-                    f"{consulta}. Contexto: {df_filtrado.describe()}"
-                )
-                for line in recomendaciones:
-                    st.markdown(f"- {line}")
+    # Resultados
+    show_data_summary(filtered_df)
+    create_interactive_map(filtered_df)
+    
+    # Exportación de datos
+    st.markdown("## 📤 Exportar Datos Optimizados")
+    export_format = st.radio("Formato de exportación", ["CSV", "Excel"], horizontal=True)
+    
+    if export_format == "CSV":
+        data = filtered_df.to_csv(index=False).encode('utf-8')
+    else:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            filtered_df.to_excel(writer, index=False)
+        data = output.getvalue()
+    
+    st.download_button(
+        label=f"Descargar {export_format}",
+        data=data,
+        file_name=f"katalis_export.{export_format.lower()}",
+        mime='text/csv' if export_format == "CSV" else 'application/vnd.ms-excel'
+    )
+    
+    # Asistente AI
+    st.markdown("## 🤖 Asistente de Segmentación con AI")
+    
+    with st.expander("Obtener recomendaciones de targeting", expanded=True):
+        api_key = st.text_input("Clave API DeepSeek", type="password",
+                              help="Obtén tu clave en: https://platform.deepseek.com/api-keys")
+        business_context = st.text_area("Describe tu negocio y objetivos",
+                                      placeholder="Ej: Vendo software ERP para manufactura...")
+        
+        if st.button("Generar recomendaciones", type="primary") and api_key and business_context:
+            with st.spinner("Analizando con DeepSeek AI..."):
+                try:
+                    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+                    response = client.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=[
+                            {"role": "system", "content": f"""
+                                Eres un experto en marketing B2B y segmentación de mercado. Analiza estos datos:
+                                {filtered_df.describe()}
+                                Sugiere estrategias de segmentación para Google Ads.
+                            """},
+                            {"role": "user", "content": business_context}
+                        ],
+                        temperature=0.5,
+                        max_tokens=500
+                    )
+                    
+                    recommendations = response.choices[0].message.content.split('\n')
+                    st.markdown("### Recomendaciones de Segmentación")
+                    for rec in recommendations:
+                        if rec.strip():
+                            st.markdown(f"- {rec.strip()}")
+                except Exception as e:
+                    st.error(f"Error en la consulta AI: {str(e)}")
 
 if __name__ == "__main__":
     main()
