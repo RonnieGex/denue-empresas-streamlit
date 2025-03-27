@@ -198,8 +198,9 @@ def main():
     with col1:
         selected_state = st.selectbox("Estado", options=sorted(df['Estado'].unique()))
         municipalities = df[df['Estado'] == selected_state]['Municipio'].unique()
-        selected_municipalities = st.multiselect("Municipios", options=sorted(municipalies),
-                                               default=sorted(municipalies)[:3])
+        # CORRECCIÓN APLICADA: 'municipalities' en lugar de 'municipalies'
+        selected_municipalities = st.multiselect("Municipios", options=sorted(municipalities),
+                                               default=sorted(municipalities)[:3])
         
     with col2:
         min_emp, max_emp = int(df['Personal Estimado'].min()), int(df['Personal Estimado'].max())
