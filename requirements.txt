@@ -1,19 +1,18 @@
-# Requirements para Prospectador B2B Katalis Movistar
+# Core dependencies
 streamlit==1.32.0
 pandas==2.1.4
 folium==0.14.0
 requests==2.31.0
 openai==1.12.0
 streamlit-folium==0.15.1
-python-dotenv==1.0.0  # Opcional para manejo de variables de entorno
 
-# Dependencias de geolocalización (necesarias para folium)
+# Supporting libraries
+numpy==1.26.0
+python-dateutil==2.8.2
+pytz==2023.3.post1
 branca==0.7.1
-jinja2==3.1.2  # Requerido por folium
+jinja2==3.1.2
+httpx==0.25.0
 
-# Para manejo de datos
-numpy==1.26.0  # Requerido por pandas
-python-dateutil==2.8.2  # Requerido por pandas
-pytz==2023.3.post1  # Requerido por pandas
-openai>=1.0.0,<2.0.0
-httpx>=0.25.0
+# Optional for production
+python-dotenv==1.0.0
