@@ -5,14 +5,19 @@ import numpy as np
 import unicodedata
 import requests
 import time
+import logging
 from folium.plugins import FastMarkerCluster
 from streamlit_folium import st_folium
 from openai import OpenAI
 from io import BytesIO
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
 
-# Configuración inicial
+# Configuración profesional
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 st.set_page_config(
     page_title="Business Intelligence Pro",
     layout="wide",
@@ -20,88 +25,84 @@ st.set_page_config(
     page_icon="📈"
 )
 
-# Constantes y Mapeos
-REQUIRED_COLUMNS = {
-    'business_name': ['nom_estab', 'nombre_comercial'],
-    'industry': ['nombre_act', 'giro_principal'],
-    'employees': ['per_ocu', 'personal_ocupado'],
-    'phone': ['telefono', 'contacto_telefonico'],
-    'email': ['correoelec', 'correo'],
-    'website': ['www', 'sitio_web'],
-    'city': ['municipio', 'ciudad'],
-    'state': ['entidad', 'estado'],
-    'latitude': ['latitud'],
-    'longitude': ['longitud']
-}
-
-COLUMN_NAMES_MAP = {
-    'business_name': 'Nombre Comercial',
-    'industry': 'Sector Industrial',
-    'employees': 'Empleados',
-    'phone': 'Teléfono',
-    'email': 'Correo Electrónico',
-    'website': 'Sitio Web',
-    'city': 'Ciudad',
-    'state': 'Estado',
-    'latitude': 'Latitud',
-    'longitude': 'Longitud'
-}
+# Constantes estratégicas
+MAX_RESULTADOS_DENUE = 1500
+CLUSTERS_OPTIMOS = range(3, 8)
+UMBRAL_ALERTA_DATOS = 10000
+MAPA_CENTRO_MX = [23.6345, -102.5528]
 
 CLAE_SECTORES = {
     'Comercio': ['46'],
-    'Servicios': ['81', '62', '61'],
-    'Manufactura': ['31', '32'],
-    'Tecnología': ['54', '51', '72'],
-    'Salud': ['62'],
-    'Educación': ['61', '85']
+    'Servicios': ['81', '62', '61', '72'],
+    'Manufactura': ['31', '32', '33'],
+    'Tecnología': ['54', '51', '72', '62'],
+    'Salud': ['62', '86'],
+    'Educación': ['61', '85', '88']
 }
 
 ESTRATO_TAMANOS = {
     'Micro (1-10)': ['1', '2'],
     'Pequeña (11-50)': ['3', '4'],
-    'Mediana (51-250)': ['5', '6']
+    'Mediana (51-250)': ['5', '6'],
+    'Grande (251+)': ['7']
 }
 
-# Clases y Funciones principales
-class DenueClient:
+class DenueProspector:
+    """Clase optimizada para interacción con API DENUE"""
+    
     def __init__(self, token):
         self.token = token
         self.base_url = "https://www.inegi.org.mx/app/api/denue/v1/consulta/BuscarAreaActEstr"
-        self.page_size = 100
-
-    @st.cache_data(ttl=3600, show_spinner="Buscando en DENUE...")
-    def buscar(_self, filtros, max_resultados=1000):
-        resultados = []
-        estrato = ",".join(filtros['estratos'])
-        sector = ",".join(filtros['sectores_clae'])
-
-        for page in range(0, max_resultados // _self.page_size):
-            try:
-                url = f"{_self.base_url}/00/0/0/0/0/{sector}/0/0/0/0/{page * _self.page_size + 1}/{(page + 1) * _self.page_size}/0/{estrato}/{_self.token}"
-                response = requests.get(url, timeout=10)
+        self.page_size = 150
+        
+    @st.cache_data(ttl=3600, show_spinner="Buscando oportunidades comerciales...")
+    def buscar_prospectos(_self, filtros):
+        try:
+            resultados = []
+            total_pages = (MAX_RESULTADOS_DENUE // _self.page_size) + 1
+            
+            for page in range(total_pages):
+                url = f"{_self.base_url}/00/0/0/0/0/{','.join(filtros['sectores_clae']}/0/0/0/0/{(page)*_self.page_size+1}/{(page+1)*_self.page_size}/0/{','.join(filtros['estratos']}/{_self.token}"
+                response = requests.get(url, timeout=15)
+                
                 if response.status_code == 200:
-                    batch = _self.parse_response(response.json())
+                    batch = _self.procesar_respuesta(response.json())
                     resultados.extend(batch)
                     if len(batch) < _self.page_size:
                         break
-                time.sleep(0.5)
-            except Exception as e:
-                st.error(f"Error en página {page + 1}: {str(e)}")
-                break
-        return pd.DataFrame(resultados)
+                elif response.status_code == 429:
+                    time.sleep(2)
+                    continue
+                
+                time.sleep(0.3)
+            
+            df = pd.DataFrame(resultados)
+            return df[df.apply(lambda x: _self.validar_coordenadas(x['Latitud'], x['Longitud']), axis=1)]
+            
+        except Exception as e:
+            logger.error(f"Error DENUE: {str(e)}")
+            st.error("Error al conectar con DENUE. Verifique filtros o intente luego.")
+            return pd.DataFrame()
 
-    def parse_response(self, data):
+    def procesar_respuesta(self, data):
         return [{
             'Nombre Comercial': item[2],
-            'Sector Industrial': item[4],
+            'Sector': item[4],
             'Empleados': self.mapear_estrato(item[5]),
             'Teléfono': item[14],
-            'Correo Electrónico': item[15],
+            'Email': item[15],
             'Sitio Web': item[16],
             'Latitud': float(item[18]),
             'Longitud': float(item[17]),
             'Origen': 'DENUE'
-        } for item in data]
+        } for item in data if self.validar_registro(item)]
+
+    def validar_registro(self, item):
+        return float(item[18]) != 0 and float(item[17]) != 0
+
+    @staticmethod
+    def validar_coordenadas(lat, lon):
+        return -90 <= lat <= 90 and -180 <= lon <= 180
 
     def mapear_estrato(self, estrato):
         return {
@@ -111,230 +112,228 @@ class DenueClient:
 
 def normalize_column_name(col_name):
     nfkd = unicodedata.normalize('NFKD', str(col_name))
-    return ''.join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip().replace(' ', '_').split('[')[0]
+    return ''.join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip().replace(' ', '_')
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_and_process(uploaded_file):
-    progress = st.progress(0, text="Iniciando procesamiento...")
     try:
-        progress.progress(10, "Leyendo archivo...")
         if uploaded_file.name.endswith('.csv'):
-            chunks = pd.read_csv(
-                uploaded_file,
-                encoding='latin1',
-                chunksize=50000,
-                dtype={'telefono': 'string'}
-            )
-            df = pd.concat(chunks)
+            chunks = pd.read_csv(uploaded_file, encoding='latin1', chunksize=50000)
+            df = pd.concat([preprocesar_chunk(chunk) for chunk in chunks])
         else:
-            df = pd.read_excel(uploaded_file, engine='openpyxl')
-
-        progress.progress(30, "Estandarizando datos...")
-        df.columns = [normalize_column_name(col) for col in df.columns]
-        rename_mapping = {}
-        for target_col, possible_cols in REQUIRED_COLUMNS.items():
-            for col in possible_cols:
-                if col in df.columns:
-                    rename_mapping[col] = target_col
-        df = df.rename(columns=rename_mapping)
-        df = df.rename(columns=COLUMN_NAMES_MAP)
-
-        required = list(COLUMN_NAMES_MAP.values())
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            st.error(f"Columnas requeridas faltantes: {', '.join(missing)}")
-            st.stop()
-
-        progress.progress(50, "Procesando información...")
-        df['Empleados'] = pd.to_numeric(df['Empleados'], errors='coerce').fillna(0).astype(int)
-
-        df['Tamaño Empresa'] = np.select(
-            [
-                df['Empleados'] <= 5,
-                df['Empleados'] <= 100,
-                df['Empleados'] > 100
-            ],
-            ['PYME', 'Mediana', 'Grande'],
-            default='Desconocido'
-        )
-
-        dtypes = {
-            'Latitud': 'float32',
-            'Longitud': 'float32',
-            'Ciudad': 'category',
-            'Estado': 'category'
-        }
-        df = df.astype(dtypes, errors='ignore')
-        df = df.dropna(subset=['Estado', 'Ciudad', 'Sector Industrial', 'Latitud', 'Longitud'])
-        df['Origen'] = 'Usuario'
-        progress.progress(100, "¡Proceso completado!")
+            df = preprocesar_chunk(pd.read_excel(uploaded_file, engine='openpyxl'))
+        
+        df = transformar_datos_usuario(df)
         return df
     except Exception as e:
-        progress.empty()
-        st.error(f"Error crítico: {str(e)}")
-        st.stop()
+        logger.error(f"Error procesamiento: {str(e)}")
+        st.error("Formato de archivo no válido")
+        return pd.DataFrame()
 
-@st.cache_data(ttl=3600)
-def analyze_with_ai(_df, api_key, segmentacion):
+def preprocesar_chunk(chunk):
+    chunk.columns = [normalize_column_name(col) for col in chunk.columns]
+    rename_mapping = {
+        col: target for target, posibles in REQUIRED_COLUMNS.items()
+        for col in posibles if col in chunk.columns
+    }
+    return chunk.rename(columns=rename_mapping).rename(columns=COLUMN_NAMES_MAP)
+
+def transformar_datos_usuario(df):
+    df['Empleados'] = pd.to_numeric(df['Empleados'], errors='coerce').fillna(0).astype(int)
+    df['Tamaño Empresa'] = np.select(
+        [df['Empleados'] <= 10, df['Empleados'] <= 50, df['Empleados'] <= 250, df['Empleados'] > 250],
+        ['Micro', 'Pequeña', 'Mediana', 'Grande'],
+        default='Desconocido'
+    )
+    df['Origen'] = 'Usuario'
+    return df.dropna(subset=['Latitud', 'Longitud'])
+
+def analisis_estrategico(_df, segmentacion, api_key):
     try:
-        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-        numeric_cols = _df.select_dtypes(include=[np.number]).columns
         scaler = StandardScaler()
-        scaled_data = scaler.fit_transform(_df[numeric_cols].fillna(0))
-
-        kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
-        _df = _df.copy()
-        _df['Segmento IA'] = kmeans.fit_predict(scaled_data)
-
-        context = {
-            'sectores_top': _df['Sector Industrial'].value_counts().nlargest(5).index.tolist(),
-            'empleados_promedio': round(_df[_df['Empleados'] > 0]['Empleados'].mean()),
-            'ciudades_clave': _df.groupby('Ciudad')['Segmento IA'].count().nlargest(3).index.tolist(),
+        features = _df[['Empleados', 'Latitud', 'Longitud']].fillna(0)
+        scaled_data = scaler.fit_transform(features)
+        
+        best_n = optimizar_clusters(scaled_data)
+        _df['Segmento'] = KMeans(n_clusters=best_n, random_state=42).fit_predict(scaled_data)
+        
+        contexto = {
+            'perfil_segmentos': _df.groupby('Segmento').agg({
+                'Empleados': 'mean',
+                'Latitud': 'mean',
+                'Longitud': 'mean'
+            }).to_dict(),
+            'top_sectores': _df['Sector'].value_counts().nlargest(3).index.tolist(),
             'segmentacion': segmentacion
         }
-
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": f"""Eres un experto en marketing digital B2B. Genera recomendaciones usando:\n- Segmentación: {segmentacion}\n- Contexto DENUE: {context}"""},
-                {"role": "user", "content": "Genera 3 estrategias segmentadas con canales específicos, enfoque geográfico y propuestas de valor personalizadas:"}
-            ],
-            temperature=0.6,
-            max_tokens=600
-        )
-
-        return {
-            'df': _df,
-            'analisis': response.choices[0].message.content,
-            'sugerencias': context
-        }
+        
+        return generar_recomendaciones_ia(contexto, api_key)
+        
     except Exception as e:
-        st.error(f"Error en análisis IA: {str(e)}")
+        logger.error(f"Error análisis IA: {str(e)}")
         return None
 
-def create_interactive_map(df):
-    if df.empty:
-        return st.warning("No hay datos para mostrar")
+def optimizar_clusters(data):
+    best_score = -1
+    best_n = 5
+    for n in CLUSTERS_OPTIMOS:
+        labels = KMeans(n_clusters=n, random_state=42).fit_predict(data)
+        score = silhouette_score(data, labels)
+        if score > best_score:
+            best_score = score
+            best_n = n
+    return best_n
 
-    with st.spinner("Generando visualización geoespacial..."):
-        map_center = [df['Latitud'].mean(), df['Longitud'].mean()]
-        m = folium.Map(location=map_center, zoom_start=10, tiles='cartodbpositron')
-        FastMarkerCluster(data=df[['Latitud', 'Longitud']].values.tolist()).add_to(m)
-        st_folium(m, width=1200, height=600)
+def generar_recomendaciones_ia(contexto, api_key):
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+    
+    prompt = f"""
+    Como experto en mercados B2B en México, analiza este contexto:
+    {contexto}
+    
+    Genera 3 estrategias de prospección que incluyan:
+    1. Canales de marketing recomendados
+    2. Enfoque geográfico
+    3. Propuesta de valor personalizada
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=500
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error IA: {str(e)}")
+        return "Recomendaciones no disponibles temporalmente"
 
-def prepare_google_ads_data(df):
-    return df[[
-        'Nombre Comercial', 'Sector Industrial', 'Tamaño Empresa',
-        'Teléfono', 'Correo Electrónico', 'Sitio Web',
-        'Ciudad', 'Estado', 'Latitud', 'Longitud', 'Origen'
-    ]].rename(columns={
-        'Nombre Comercial': 'Business Name',
-        'Sector Industrial': 'Industry Category',
-        'Tamaño Empresa': 'Company Size',
-        'Teléfono': 'Phone',
-        'Correo Electrónico': 'Email',
-        'Sitio Web': 'Website',
-        'Ciudad': 'City',
-        'Estado': 'State',
-        'Latitud': 'Latitude',
-        'Longitud': 'Longitude',
-        'Origen': 'Data Source'
-    }).dropna()
+def crear_mapa_interactivo(df):
+    m = folium.Map(location=MAPA_CENTRO_MX, zoom_start=5, tiles='cartodbpositron')
+    for _, row in df.iterrows():
+        folium.CircleMarker(
+            location=[row['Latitud'], row['Longitud']],
+            radius=calcular_radio(row['Empleados']),
+            color='#1f77b4' if row['Origen'] == 'Usuario' else '#2ca02c',
+            fill=True,
+            popup=f"<b>{row['Nombre Comercial']}</b><br>{row['Sector']}<br>Empleados: {row['Empleados']}"
+        ).add_to(m)
+    st_folium(m, width=1200, height=600)
+
+def calcular_radio(empleados):
+    return max(3, min(empleados / 10, 15))
 
 def main():
-    st.title("🚀 Business Intelligence Suite")
-    st.markdown("Plataforma avanzada de análisis comercial con integración DENUE")
-
-    if 'api_key' not in st.session_state:
-        st.session_state.api_key = None
-    if 'processed_data' not in st.session_state:
-        st.session_state.processed_data = None
-    if 'denue_token' not in st.session_state:
-        st.session_state.denue_token = None
-
+    st.title("🚀 Business Intelligence Pro")
+    st.markdown("**Herramienta de prospección comercial inteligente para México**")
+    
+    # Estado de la sesión
+    if 'prospectos' not in st.session_state:
+        st.session_state.prospectos = None
+    
+    # Sidebar
     with st.sidebar:
-        st.header("⚙ Configuración")
-        st.session_state.api_key = st.text_input("Clave DeepSeek API", type="password")
-        st.session_state.denue_token = st.text_input("Token DENUE", type="password")
-
-        st.divider()
-        with st.expander("🎯 Parámetros de Segmentación"):
-            segmentacion = {
-                'edad': st.selectbox("Edad del dueño:", ["30-50 años (Crecimiento)", "51-65 años (Consolidados)"]),
-                'educacion': st.selectbox("Nivel educativo:", ["Licenciatura+", "Posgrado en negocios/tecnología"]),
-                'tamanos': st.multiselect("Tamaño empresa:", list(ESTRATO_TAMANOS.keys())),
-                'sectores': st.multiselect("Sectores objetivo:", list(CLAE_SECTORES.keys()))
-            }
-
-    uploaded_file = st.file_uploader("Cargar base de empresas (CSV/Excel)", type=["csv", "xlsx"])
-
-    if uploaded_file and st.session_state.api_key and st.session_state.denue_token:
-        if st.session_state.processed_data is None or uploaded_file.file_id != st.session_state.get('file_id'):
-            with st.status("Analizando datos...", expanded=True) as status:
+        st.header("🎯 Segmentación Estratégica")
+        
+        denue_token = st.text_input("Token DENUE", type="password")
+        api_key = st.text_input("DeepSeek API Key", type="password")
+        
+        with st.expander("Configuración Avanzada"):
+            sectores = st.multiselect(
+                "Sectores objetivo",
+                options=list(CLAE_SECTORES.keys()),
+                default=['Tecnología', 'Servicios']
+            )
+            
+            tamanos = st.multiselect(
+                "Tamaño de empresa",
+                options=list(ESTRATO_TAMANOS.keys()),
+                default=['Pequeña (11-50)', 'Mediana (51-250)']
+            )
+            
+            perfil_decisionor = st.selectbox(
+                "Perfil del decisionador",
+                options=["Director General", "Gerente de Compras", "Director de TI"],
+                index=0
+            )
+        
+        if st.button("Buscar Prospectos"):
+            with st.status("Analizando mercado..."):
                 try:
-                    st.write("🔍 Procesando datos cargados...")
-                    df_usuario = load_and_process(uploaded_file)
-
-                    st.write("🌐 Consultando API DENUE...")
-                    denue = DenueClient(st.session_state.denue_token)
+                    # Obtener datos DENUE
+                    denue_client = DenueProspector(denue_token)
                     filtros = {
-                        'sectores_clae': [clae for s in segmentacion['sectores'] for clae in CLAE_SECTORES[s]],
-                        'estratos': [e for t in segmentacion['tamanos'] for e in ESTRATO_TAMANOS[t]]
+                        'sectores_clae': [clae for s in sectores for clae in CLAE_SECTORES[s]],
+                        'estratos': [e for t in tamanos for e in ESTRATO_TAMANOS[t]]
                     }
-                    df_denue = denue.buscar(filtros)
-
-                    full_df = pd.concat([df_usuario, df_denue], ignore_index=True)
-
-                    st.write("🧐 Ejecutando modelos predictivos...")
-                    result = analyze_with_ai(full_df, st.session_state.api_key, segmentacion)
-
-                    if result:
-                        st.session_state.processed_data = result
-                        st.session_state.file_id = uploaded_file.file_id
-                        status.update(label="Análisis completo ✅", state="complete")
+                    df_denue = denue_client.buscar_prospectos(filtros)
+                    
+                    # Combinar con datos usuario
+                    uploaded_file = st.file_uploader("Cargar base propia (opcional)", type=["csv", "xlsx"])
+                    df_usuario = load_and_process(uploaded_file) if uploaded_file else pd.DataFrame()
+                    
+                    st.session_state.prospectos = pd.concat([df_denue, df_usuario], ignore_index=True)
+                    
                 except Exception as e:
-                    st.error(f"Error en el procesamiento: {str(e)}")
-                    st.session_state.processed_data = None
+                    st.error(f"Error: {str(e)}")
 
-    if st.session_state.processed_data is not None:
-        st.markdown("## 📈 Resultados del Análisis")
-
-        st.markdown("### 🎯 Recomendaciones Estratégicas")
-        st.write(st.session_state.processed_data['analisis'])
-
-        col1, col2 = st.columns(2)
+    # Resultados
+    if st.session_state.prospectos is not None:
+        st.markdown(f"## 📊 {len(st.session_state.prospectos)} Prospectos Identificados")
+        
+        col1, col2 = st.columns([2, 1])
         with col1:
-            selected_sectors = st.multiselect("Sectores clave", st.session_state.processed_data['sugerencias']['sectores_top'])
+            st.markdown("### 🌍 Concentración Geográfica")
+            crear_mapa_interactivo(st.session_state.prospectos)
+        
         with col2:
-            selected_cities = st.multiselect("Ubicaciones estratégicas", st.session_state.processed_data['sugerencias']['ciudades_clave'])
-
-        filtered_df = st.session_state.processed_data['df'][
-            (st.session_state.processed_data['df']['Sector Industrial'].isin(selected_sectors)) &
-            (st.session_state.processed_data['df']['Ciudad'].isin(selected_cities))
-        ]
-
-        st.markdown("### 🌍 Mapa de Concentración Comercial")
-        create_interactive_map(filtered_df)
-
-        st.markdown("## 📄 Exportación de Datos")
-        export_format = st.radio("Formato de salida:", ["CSV", "Excel"], horizontal=True)
-        google_ads_data = prepare_google_ads_data(filtered_df)
-
+            st.markdown("### 🔍 Filtros Estratégicos")
+            sector_selected = st.multiselect(
+                "Sectores prioritarios",
+                options=st.session_state.prospectos['Sector'].unique(),
+                default=st.session_state.prospectos['Sector'].value_counts().nlargest(2).index.tolist()
+            )
+            
+            tamano_selected = st.multiselect(
+                "Tamaño objetivo",
+                options=st.session_state.prospectos['Tamaño Empresa'].unique(),
+                default=['Pequeña', 'Mediana']
+            )
+            
+            if st.button("Generar Recomendaciones"):
+                df_filtrado = st.session_state.prospectos[
+                    (st.session_state.prospectos['Sector'].isin(sector_selected)) &
+                    (st.session_state.prospectos['Tamaño Empresa'].isin(tamano_selected))
+                ]
+                
+                with st.spinner("Analizando con IA..."):
+                    recomendaciones = analisis_estrategico(df_filtrado, {
+                        'sectores': sector_selected,
+                        'tamanos': tamano_selected,
+                        'perfil': perfil_decisionor
+                    }, api_key)
+                    
+                    st.markdown("### 🧠 Estrategias Recomendadas")
+                    st.markdown(recomendaciones)
+        
+        st.markdown("### 📥 Exportar Prospectos")
+        export_format = st.radio("Formato", ["CSV", "Excel"], horizontal=True)
+        
         if export_format == "CSV":
-            data = google_ads_data.to_csv(index=False).encode('utf-8')
+            data = st.session_state.prospectos.to_csv(index=False).encode('utf-8')
         else:
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                google_ads_data.to_excel(writer, index=False)
+                st.session_state.prospectos.to_excel(writer, index=False)
             data = output.getvalue()
-
+        
         st.download_button(
-            "Descargar Dataset Optimizado",
+            "Descargar Dataset",
             data=data,
-            file_name=f"business_data_{pd.Timestamp.now().strftime('%Y%m%d')}.{export_format.lower()}",
-            mime="application/octet-stream"
+            file_name=f"prospectos_{pd.Timestamp.now().strftime('%Y%m%d')}.{export_format.lower()}",
+            mime='text/csv' if export_format == "CSV" else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
 
 if __name__ == "__main__":
     main()
-
