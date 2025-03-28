@@ -6,6 +6,7 @@ from openai import OpenAI
 import json
 import re
 import io
+import chardet
 
 # Configuración de la app
 st.set_page_config(
@@ -14,12 +15,32 @@ st.set_page_config(
     page_icon="📡"
 )
 
-# ------------------ Carga de Datos desde CSV ------------------
+# ------------------ Carga de Datos desde CSV con detección de codificación ------------------
 def cargar_base_datos(uploaded_file):
-    """Carga la base de datos desde un archivo CSV"""
+    """Carga la base de datos desde un archivo CSV con detección automática de codificación"""
     try:
         if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
+            # Leer los primeros bytes para detectar la codificación
+            rawdata = uploaded_file.read(10000)
+            uploaded_file.seek(0)  # Volver al inicio del archivo
+            
+            # Detectar la codificación
+            result = chardet.detect(rawdata)
+            encoding = result['encoding']
+            
+            # Intentar cargar con la codificación detectada
+            try:
+                df = pd.read_csv(uploaded_file, encoding=encoding)
+            except:
+                # Fallback a otras codificaciones comunes
+                for enc in ['latin1', 'ISO-8859-1', 'utf-16', 'windows-1252']:
+                    try:
+                        uploaded_file.seek(0)
+                        df = pd.read_csv(uploaded_file, encoding=enc)
+                        break
+                    except:
+                        continue
+            
             # Verificar columnas mínimas requeridas
             columnas_requeridas = {'Nombre', 'Sector', 'Estrato', 'Teléfono', 
                                   'Email', 'Dirección', 'Latitud', 'Longitud'}
@@ -136,11 +157,35 @@ def main():
         st.header("⚙️ Configuración")
         deepseek_key = st.text_input("API Key de DeepSeek", type="password")
         uploaded_file = st.file_uploader("Sube tu archivo CSV", type=['csv'])
+        
+        # Mostrar instrucciones para el CSV
+        with st.expander("ℹ️ Instrucciones para el CSV"):
+            st.markdown("""
+            El archivo CSV debe contener estas columnas:
+            - **Nombre**: Nombre de la empresa
+            - **Sector**: Sector/industria de la empresa
+            - **Estrato**: Rango de empleados (ej. '51-100')
+            - **Teléfono**: Número de contacto
+            - **Email**: Correo electrónico
+            - **Dirección**: Dirección completa
+            - **Latitud**: Coordenada geográfica
+            - **Longitud**: Coordenada geográfica
+            
+            Codificación recomendada: UTF-8
+            """)
     
     # Cargar datos
     df = None
     if uploaded_file:
-        df = cargar_base_datos(uploaded_file)
+        with st.spinner("Cargando y detectando codificación del archivo..."):
+            df = cargar_base_datos(uploaded_file)
+        
+        if df is not None:
+            st.success(f"✅ Archivo cargado correctamente con {len(df)} registros")
+            
+            # Mostrar vista previa
+            with st.expander("🔍 Vista previa de los datos"):
+                st.dataframe(df.head(3))
     
     # Entrada de descripción
     descripcion = st.text_area(
@@ -153,7 +198,7 @@ def main():
             st.warning("Ingresa tu API Key de DeepSeek")
             return
             
-        with st.spinner("Analizando descripción..."):
+        with st.spinner("Analizando descripción con IA..."):
             parametros = interpretar_prompt_con_ia(descripcion, deepseek_key)
         
         if parametros:
