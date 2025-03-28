@@ -9,3 +9,4 @@ streamlit-folium>=0.13.0
 openpyxl>=3.1.2
 pyarrow>=14.0.0
 xlrd>=2.0.1
+protobuf>=4.25.3
