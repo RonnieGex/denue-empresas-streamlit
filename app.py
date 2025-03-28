@@ -1,169 +1,313 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
 import folium
+import re
 import unicodedata
+import numpy as np
 from folium.plugins import FastMarkerCluster
 from streamlit_folium import st_folium
+from openai import OpenAI
 from io import BytesIO
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import hashlib
 
 # Configuración inicial
 st.set_page_config(
-    page_title="DENUE a Google Ads",
+    page_title="Business Intelligence Pro",
     layout="wide",
-    page_icon="📈",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    page_icon="📈"
 )
 
-# Mapeo de columnas según diccionario DENUE
-COLUMN_MAPPING = {
-    'nom_estab': 'nombre_negocio',
-    'nombre_act': 'giro_principal',
-    'per_ocu': 'personal_ocupado',
-    'telefono': 'telefono',
-    'correoelec': 'email',
-    'www': 'sitio_web',
-    'municipio': 'municipio',
-    'entidad': 'estado',
-    'latitud': 'latitud',
-    'longitud': 'longitud'
+# Constantes mejoradas (sin referencia a DENUE)
+REQUIRED_COLUMNS = {
+    'business_name': ['nom_estab', 'nombre_comercial'],
+    'industry': ['nombre_act', 'giro_principal'],
+    'employees': ['per_ocu', 'personal_ocupado'],
+    'phone': ['telefono', 'contacto_telefonico'],
+    'email': ['correoelec', 'correo'],
+    'website': ['www', 'sitio_web'],
+    'city': ['municipio', 'ciudad'],
+    'state': ['entidad', 'estado'],
+    'latitude': ['latitud'],
+    'longitude': ['longitud']
 }
 
-REQUIRED_COLUMNS = [
-    'nombre_negocio', 'giro_principal', 'personal_ocupado',
-    'telefono', 'email', 'sitio_web', 'municipio',
-    'estado', 'latitud', 'longitud'
-]
+COLUMN_NAMES_MAP = {
+    'business_name': 'Nombre Comercial',
+    'industry': 'Sector Industrial',
+    'employees': 'Empleados',
+    'phone': 'Teléfono',
+    'email': 'Correo Electrónico',
+    'website': 'Sitio Web',
+    'city': 'Ciudad',
+    'state': 'Estado',
+    'latitude': 'Latitud',
+    'longitude': 'Longitud'
+}
 
-def clean_column_name(col_name):
-    """Normaliza nombres de columnas según DENUE"""
+# Función de seguridad mejorada
+def encrypt_data(data):
+    return hashlib.sha256(data.encode()).hexdigest()
+
+def normalize_column_name(col_name):
+    """Normalización robusta de nombres de columnas"""
     nfkd = unicodedata.normalize('NFKD', str(col_name))
     return ''.join([c for c in nfkd if not unicodedata.combining(c)])\
         .lower().strip().replace(' ', '_').split('[')[0]
 
-def convert_employee_code(code):
-    """Convierte códigos DENUE a rangos de empleados"""
-    try:
-        code = int(str(code).strip())
-        ranges = {
-            1: (0, 5, 'PYME'),
-            2: (6, 10, 'PYME'),
-            3: (11, 30, 'PYME'),
-            4: (31, 50, 'PYME'),
-            5: (51, 100, 'Mediana'),
-            6: (101, 250, 'Mediana'),
-            7: (251, 1000, 'Grande')
-        }
-        return ranges.get(code, (0, 0, 'Desconocido'))
-    except:
-        return (0, 0, 'Desconocido')
-
-@st.cache_data(ttl=3600)
-def process_data(uploaded_file):
-    """Procesamiento seguro de datos DENUE"""
-    try:
-        # Carga de datos
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file, encoding='latin1', dtype=str)
-        else:
-            df = pd.read_excel(uploaded_file, dtype=str)
-        
-        # Limpieza y normalización
-        df.columns = [clean_column_name(col) for col in df.columns]
-        df = df.rename(columns=COLUMN_MAPPING)
-        
-        # Conversión de códigos
-        df[['empleo_min', 'empleo_max', 'tamano_empresa']] = df['personal_ocupado'].apply(
-            lambda x: pd.Series(convert_employee_code(x))
-        )
-        
-        # Filtrado y tipado
-        df = df[REQUIRED_COLUMNS + ['empleo_max', 'tamano_empresa']]
-        df['empleo_max'] = pd.to_numeric(df['empleo_max'], errors='coerce')
-        df['latitud'] = pd.to_numeric(df['latitud'], errors='coerce')
-        df['longitud'] = pd.to_numeric(df['longitud'], errors='coerce')
-        
-        return df.dropna(subset=['latitud', 'longitud'])
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_and_process(uploaded_file):
+    """Carga y procesamiento optimizado con manejo de tipos"""
+    progress = st.progress(0, text="Iniciando procesamiento...")
     
+    try:
+        # Lectura adaptativa para grandes datasets
+        progress.progress(10, "Leyendo archivo...")
+        if uploaded_file.name.endswith('.csv'):
+            chunks = pd.read_csv(
+                uploaded_file,
+                encoding='latin1',
+                chunksize=50000,
+                dtype={'telefono': 'string', 'correoelec': 'string'}
+            )
+            df = pd.concat(chunks)
+        else:
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
+
+        # Normalización avanzada
+        progress.progress(30, "Estandarizando datos...")
+        df.columns = [normalize_column_name(col) for col in df.columns]
+        
+        # Mapeo dinámico de columnas
+        rename_mapping = {}
+        for target_col, possible_cols in REQUIRED_COLUMNS.items():
+            for col in possible_cols:
+                if col in df.columns:
+                    rename_mapping[col] = target_col
+        df = df.rename(columns=rename_mapping)
+        df = df.rename(columns=COLUMN_NAMES_MAP)
+
+        # Validación mejorada
+        required = list(COLUMN_NAMES_MAP.values())
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            st.error(f"Columnas requeridas faltantes: {', '.join(missing)}")
+            st.stop()
+
+        # Conversión segura a numérico
+        progress.progress(50, "Procesando empleados...")
+        df['Empleados'] = pd.to_numeric(df['Empleados'], errors='coerce')
+        df['Tamaño Empresa'] = np.select(
+            [
+                df['Empleados'] <= 5,
+                df['Empleados'] <= 100,
+                df['Empleados'] > 100
+            ],
+            ['PYME', 'Mediana', 'Grande'],
+            default='Desconocido'
+        )
+
+        # Optimización de memoria
+        dtypes = {
+            'Latitud': 'float32',
+            'Longitud': 'float32',
+            'Ciudad': 'category',
+            'Estado': 'category'
+        }
+        df = df.astype(dtypes, errors='ignore')
+
+        # Limpieza final
+        progress.progress(80, "Depurando datos...")
+        df = df.dropna(subset=['Estado', 'Ciudad', 'Sector Industrial'])
+        
+        progress.progress(100, "¡Proceso completado!")
+        return df
+
     except Exception as e:
+        progress.empty()
         st.error(f"Error crítico: {str(e)}")
         st.stop()
 
-def create_google_ads_export(df):
-    """Formato final para Google Ads"""
+@st.cache_data(ttl=3600)
+def analyze_with_ai(_df, api_key):
+    """Análisis predictivo con DeepSeek AI"""
+    try:
+        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+        
+        # Clusterización avanzada
+        numeric_cols = _df.select_dtypes(include=[np.number]).columns
+        scaler = StandardScaler()
+        scaled_data = scaler.fit_transform(_df[numeric_cols].fillna(0))
+        
+        kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
+        _df['Segmento IA'] = kmeans.fit_predict(scaled_data)
+        
+        # Generación de recomendaciones
+        context = {
+            'sectores_top': _df['Sector Industrial'].value_counts().nlargest(5).index.tolist(),
+            'empleados_promedio': round(_df['Empleados'].mean()),
+            'ciudades_clave': _df.groupby('Ciudad')['Segmento IA'].count().nlargest(3).index.tolist()
+        }
+        
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{
+                "role": "system",
+                "content": "Eres un experto en marketing digital B2B. Genera recomendaciones basadas en:"
+            },{
+                "role": "user",
+                "content": f"{context}\n\nSugiere estrategias segmentadas para Google Ads:"
+            }],
+            temperature=0.6,
+            max_tokens=600
+        )
+        
+        return {
+            'df': _df,
+            'analisis': response.choices[0].message.content,
+            'sugerencias': context
+        }
+        
+    except Exception as e:
+        st.error(f"Error en análisis IA: {str(e)}")
+        return None
+
+def create_interactive_map(df):
+    """Mapa interactivo con clusters optimizados"""
+    if df.empty:
+        st.warning("No hay datos para mostrar")
+        return
+    
+    map_center = [df['Latitud'].mean(), df['Longitud'].mean()]
+    with st.spinner("Generando visualización geoespacial..."):
+        m = folium.Map(location=map_center, zoom_start=10, tiles='cartodbpositron')
+        FastMarkerCluster(data=df[['Latitud', 'Longitud']].values.tolist()).add_to(m)
+        st_folium(m, width=1200, height=600)
+
+def prepare_google_ads_data(df):
+    """Transformación profesional para Google Ads"""
     return df[[
-        'nombre_negocio', 'giro_principal', 'tamano_empresa',
-        'telefono', 'email', 'sitio_web', 'municipio',
-        'estado', 'latitud', 'longitud'
+        'Nombre Comercial',
+        'Sector Industrial',
+        'Tamaño Empresa',
+        'Teléfono',
+        'Correo Electrónico',
+        'Sitio Web',
+        'Ciudad',
+        'Estado',
+        'Latitud',
+        'Longitud'
     ]].rename(columns={
-        'nombre_negocio': 'Business Name',
-        'giro_principal': 'Industry Category',
-        'tamano_empresa': 'Company Size',
-        'telefono': 'Phone',
-        'email': 'Email',
-        'sitio_web': 'Website',
-        'municipio': 'City',
-        'estado': 'State',
-        'latitud': 'Latitude',
-        'longitud': 'Longitude'
-    })
+        'Nombre Comercial': 'Business Name',
+        'Sector Industrial': 'Industry Category',
+        'Tamaño Empresa': 'Company Size',
+        'Teléfono': 'Phone',
+        'Correo Electrónico': 'Email',
+        'Sitio Web': 'Website',
+        'Ciudad': 'City',
+        'Estado': 'State',
+        'Latitud': 'Latitude',
+        'Longitud': 'Longitude'
+    }).dropna()
 
 def main():
-    st.title("🚀 Transformador DENUE a Google Ads")
-    st.markdown("Convierte bases DENUE en datasets listos para campañas publicitarias")
-    
-    # Carga de archivo
+    # Gestión de estado de sesión
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = None
+    if 'processed_data' not in st.session_state:
+        st.session_state.processed_data = None
+
+    # Interfaz profesional
+    st.title("🚀 Business Intelligence Suite")
+    st.markdown("Plataforma avanzada de análisis y optimización comercial")
+
+    # Configuración de API segura
+    with st.expander("⚙ Configuración Avanzada", expanded=False):
+        api_input = st.text_input("Clave API", type="password", 
+                                help="Requerida para funciones de inteligencia artificial")
+        if api_input:
+            st.session_state.api_key = encrypt_data(api_input)
+            st.success("Configuración de seguridad actualizada")
+
+    # Carga de archivo mejorada
     uploaded_file = st.file_uploader(
-        "Sube tu archivo DENUE (CSV/Excel)",
+        "Cargar base de empresas (CSV/Excel)",
         type=["csv", "xlsx"],
-        help="Tamaño máximo recomendado: 500MB"
+        help="Formatos soportados: CSV, Excel (hasta 500MB)"
     )
-    
-    if uploaded_file:
-        with st.status("Procesando...", expanded=True) as status:
-            try:
-                # Procesamiento
-                st.write("🔍 Validando estructura del archivo...")
-                df = process_data(uploaded_file)
-                
-                # Análisis rápido
-                st.write("📊 Analizando datos...")
-                st.session_state.processed_data = df
-                status.update(label="Procesamiento completo", state="complete")
-                
-            except Exception as e:
-                st.error(f"Error en el procesamiento: {str(e)}")
-                st.stop()
+
+    # Procesamiento con IA
+    if uploaded_file and st.session_state.api_key:
+        if st.session_state.processed_data is None or uploaded_file.file_id != st.session_state.get('file_id'):
+            with st.status("Analizando datos...", expanded=True) as status:
+                try:
+                    st.write("🔍 Validando estructura del archivo...")
+                    df = load_and_process(uploaded_file)
+                    
+                    st.write("🧠 Ejecutando modelos predictivos...")
+                    result = analyze_with_ai(df, st.session_state.api_key)
+                    
+                    if result:
+                        st.session_state.processed_data = result
+                        st.session_state.file_id = uploaded_file.file_id
+                        status.update(label="Análisis completo ✅", state="complete")
+                except Exception as e:
+                    st.error(f"Error en el procesamiento: {str(e)}")
+                    st.session_state.processed_data = None
+
+    # Visualización de resultados
+    if st.session_state.processed_data:
+        st.markdown("## 📈 Resultados del Análisis")
         
-        # Visualización
-        st.markdown("## Vista previa de datos")
-        st.dataframe(df.head(100), use_container_width=True)
+        with st.container():
+            st.markdown("### 🎯 Recomendaciones Estratégicas")
+            st.write(st.session_state.processed_data['analisis'])
         
-        # Mapa interactivo
-        st.markdown("## 🌍 Mapa de concentración")
-        if not df.empty:
-            m = folium.Map(location=[df['latitud'].mean(), df['longitud'].mean()], zoom_start=10)
-            FastMarkerCluster(data=df[['latitud', 'longitud']].values.tolist()).add_to(m)
-            st_folium(m, width=1200, height=600)
+        # Filtros interactivos
+        col1, col2 = st.columns(2)
+        with col1:
+            selected_sectors = st.multiselect(
+                "Sectores clave",
+                options=st.session_state.processed_data['sugerencias']['sectores_top'],
+                default=st.session_state.processed_data['sugerencias']['sectores_top'][:2]
+            )
+        with col2:
+            selected_cities = st.multiselect(
+                "Ubicaciones estratégicas",
+                options=st.session_state.processed_data['sugerencias']['ciudades_clave'],
+                default=st.session_state.processed_data['sugerencias']['ciudades_clave']
+            )
         
-        # Exportación
-        st.markdown("## 📤 Exportar para Google Ads")
-        export_format = st.radio("Formato de exportación:", ["CSV", "Excel"], horizontal=True)
+        # Aplicación de filtros
+        filtered_df = st.session_state.processed_data['df'][
+            (st.session_state.processed_data['df']['Sector Industrial'].isin(selected_sectors)) &
+            (st.session_state.processed_data['df']['Ciudad'].isin(selected_cities))
+        ]
         
-        google_ads_df = create_google_ads_export(df)
+        # Visualización geoespacial
+        st.markdown("### 🌍 Mapa de Concentración Comercial")
+        create_interactive_map(filtered_df)
+        
+        # Exportación profesional
+        st.markdown("## 📤 Exportación de Datos")
+        export_format = st.radio("Formato de salida:", ["CSV", "Excel"], horizontal=True)
+        
+        google_ads_data = prepare_google_ads_data(filtered_df)
         if export_format == "CSV":
-            data = google_ads_df.to_csv(index=False).encode('utf-8')
+            data = google_ads_data.to_csv(index=False).encode('utf-8')
         else:
             output = BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                google_ads_df.to_excel(writer, index=False)
+                google_ads_data.to_excel(writer, index=False)
             data = output.getvalue()
         
         st.download_button(
             "Descargar Dataset Optimizado",
             data=data,
-            file_name=f"google_ads_ready.{export_format.lower()}",
+            file_name=f"business_data_{pd.Timestamp.now().strftime('%Y%m%d')}.{export_format.lower()}",
             mime='text/csv' if export_format == "CSV" else 'application/vnd.ms-excel'
         )
 
