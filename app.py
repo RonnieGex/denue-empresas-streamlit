@@ -48,8 +48,6 @@ ESTRATO_TAMANOS = {
 }
 
 class DenueProspector:
-    """Clase optimizada para interacción con API DENUE"""
-    
     def __init__(self, token):
         self.token = token
         self.base_url = "https://www.inegi.org.mx/app/api/denue/v1/consulta/BuscarAreaActEstr"
@@ -62,7 +60,7 @@ class DenueProspector:
             total_pages = (MAX_RESULTADOS_DENUE // _self.page_size) + 1
             
             for page in range(total_pages):
-                url = f"{_self.base_url}/00/0/0/0/0/{','.join(filtros['sectores_clae']}/0/0/0/0/{(page)*_self.page_size+1}/{(page+1)*_self.page_size}/0/{','.join(filtros['estratos']}/{_self.token}"
+                url = f"{_self.base_url}/00/0/0/0/0/{','.join(filtros['sectores_clae'])}/0/0/0/0/{(page)*_self.page_size+1}/{(page+1)*_self.page_size}/0/{','.join(filtros['estratos'])}/{_self.token}"
                 response = requests.get(url, timeout=15)
                 
                 if response.status_code == 200:
@@ -123,8 +121,7 @@ def load_and_process(uploaded_file):
         else:
             df = preprocesar_chunk(pd.read_excel(uploaded_file, engine='openpyxl'))
         
-        df = transformar_datos_usuario(df)
-        return df
+        return transformar_datos_usuario(df)
     except Exception as e:
         logger.error(f"Error procesamiento: {str(e)}")
         st.error("Formato de archivo no válido")
@@ -132,11 +129,31 @@ def load_and_process(uploaded_file):
 
 def preprocesar_chunk(chunk):
     chunk.columns = [normalize_column_name(col) for col in chunk.columns]
-    rename_mapping = {
-        col: target for target, posibles in REQUIRED_COLUMNS.items()
-        for col in posibles if col in chunk.columns
-    }
-    return chunk.rename(columns=rename_mapping).rename(columns=COLUMN_NAMES_MAP)
+    return chunk.rename(columns={
+        col: target for target, posibles in {
+            'business_name': ['nom_estab', 'nombre_comercial'],
+            'industry': ['nombre_act', 'giro_principal'],
+            'employees': ['per_ocu', 'personal_ocupado'],
+            'phone': ['telefono', 'contacto_telefonico'],
+            'email': ['correoelec', 'correo'],
+            'website': ['www', 'sitio_web'],
+            'city': ['municipio', 'ciudad'],
+            'state': ['entidad', 'estado'],
+            'latitude': ['latitud'],
+            'longitude': ['longitud']
+        }.items() for col in posibles if col in chunk.columns
+    }).rename(columns={
+        'business_name': 'Nombre Comercial',
+        'industry': 'Sector',
+        'employees': 'Empleados',
+        'phone': 'Teléfono',
+        'email': 'Email',
+        'website': 'Sitio Web',
+        'city': 'Ciudad',
+        'state': 'Estado',
+        'latitude': 'Latitud',
+        'longitude': 'Longitud'
+    })
 
 def transformar_datos_usuario(df):
     df['Empleados'] = pd.to_numeric(df['Empleados'], errors='coerce').fillna(0).astype(int)
@@ -228,16 +245,15 @@ def main():
     st.title("🚀 Business Intelligence Pro")
     st.markdown("**Herramienta de prospección comercial inteligente para México**")
     
-    # Estado de la sesión
+    # Configurar en secrets.toml o variables de entorno
+    DENUE_TOKEN = "8e4c6e3-fd02-4650-9972-3437d1827f03"  # Mover a secrets
+    DEEPSEEK_API_KEY = "sk-78174fe17b1e4f699aaaa2f5dd2e114c"  # Mover a secrets
+    
     if 'prospectos' not in st.session_state:
         st.session_state.prospectos = None
     
-    # Sidebar
     with st.sidebar:
         st.header("🎯 Segmentación Estratégica")
-        
-        denue_token = st.text_input("Token DENUE", type="password")
-        api_key = st.text_input("DeepSeek API Key", type="password")
         
         with st.expander("Configuración Avanzada"):
             sectores = st.multiselect(
@@ -261,15 +277,13 @@ def main():
         if st.button("Buscar Prospectos"):
             with st.status("Analizando mercado..."):
                 try:
-                    # Obtener datos DENUE
-                    denue_client = DenueProspector(denue_token)
+                    denue_client = DenueProspector(DENUE_TOKEN)
                     filtros = {
                         'sectores_clae': [clae for s in sectores for clae in CLAE_SECTORES[s]],
                         'estratos': [e for t in tamanos for e in ESTRATO_TAMANOS[t]]
                     }
                     df_denue = denue_client.buscar_prospectos(filtros)
                     
-                    # Combinar con datos usuario
                     uploaded_file = st.file_uploader("Cargar base propia (opcional)", type=["csv", "xlsx"])
                     df_usuario = load_and_process(uploaded_file) if uploaded_file else pd.DataFrame()
                     
@@ -278,7 +292,6 @@ def main():
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
 
-    # Resultados
     if st.session_state.prospectos is not None:
         st.markdown(f"## 📊 {len(st.session_state.prospectos)} Prospectos Identificados")
         
@@ -312,7 +325,7 @@ def main():
                         'sectores': sector_selected,
                         'tamanos': tamano_selected,
                         'perfil': perfil_decisionor
-                    }, api_key)
+                    }, DEEPSEEK_API_KEY)
                     
                     st.markdown("### 🧠 Estrategias Recomendadas")
                     st.markdown(recomendaciones)
