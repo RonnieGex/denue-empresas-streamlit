@@ -1,10 +1,8 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import folium
-import re
-import unicodedata
 import numpy as np
+import unicodedata
 from folium.plugins import FastMarkerCluster
 from streamlit_folium import st_folium
 from openai import OpenAI
@@ -13,6 +11,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import hashlib
 
+# Configuración inicial
 st.set_page_config(
     page_title="Business Intelligence Pro",
     layout="wide",
@@ -20,6 +19,7 @@ st.set_page_config(
     page_icon="📈"
 )
 
+# Constantes mejoradas
 REQUIRED_COLUMNS = {
     'business_name': ['nom_estab', 'nombre_comercial'],
     'industry': ['nombre_act', 'giro_principal'],
@@ -57,23 +57,26 @@ def normalize_column_name(col_name):
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_and_process(uploaded_file):
     progress = st.progress(0, text="Iniciando procesamiento...")
-
+    
     try:
+        # Lectura de datos
         progress.progress(10, "Leyendo archivo...")
         if uploaded_file.name.endswith('.csv'):
             chunks = pd.read_csv(
                 uploaded_file,
                 encoding='latin1',
                 chunksize=50000,
-                dtype={'telefono': 'string', 'correoelec': 'string'}
+                dtype={'telefono': 'string'}
             )
             df = pd.concat(chunks)
         else:
             df = pd.read_excel(uploaded_file, engine='openpyxl')
 
+        # Normalización
         progress.progress(30, "Estandarizando datos...")
         df.columns = [normalize_column_name(col) for col in df.columns]
-
+        
+        # Mapeo de columnas
         rename_mapping = {}
         for target_col, possible_cols in REQUIRED_COLUMNS.items():
             for col in possible_cols:
@@ -82,17 +85,18 @@ def load_and_process(uploaded_file):
         df = df.rename(columns=rename_mapping)
         df = df.rename(columns=COLUMN_NAMES_MAP)
 
+        # Validación
         required = list(COLUMN_NAMES_MAP.values())
         missing = [col for col in required if col not in df.columns]
         if missing:
             st.error(f"Columnas requeridas faltantes: {', '.join(missing)}")
             st.stop()
 
-        progress.progress(50, "Procesando empleados...")
-
+        # Procesamiento de empleados
+        progress.progress(50, "Procesando información...")
         df['Empleados'] = pd.to_numeric(df['Empleados'], errors='coerce')
-        df['Empleados'] = df['Empleados'].fillna(0).astype('int32')
-
+        df['Empleados'] = df['Empleados'].fillna(0).astype(int)
+        
         df['Tamaño Empresa'] = np.select(
             [
                 df['Empleados'] <= 5,
@@ -103,6 +107,7 @@ def load_and_process(uploaded_file):
             default='Desconocido'
         )
 
+        # Optimización
         dtypes = {
             'Latitud': 'float32',
             'Longitud': 'float32',
@@ -111,9 +116,10 @@ def load_and_process(uploaded_file):
         }
         df = df.astype(dtypes, errors='ignore')
 
+        # Limpieza final
         progress.progress(80, "Depurando datos...")
         df = df.dropna(subset=['Estado', 'Ciudad', 'Sector Industrial', 'Latitud', 'Longitud'])
-
+        
         progress.progress(100, "¡Proceso completado!")
         return df
 
@@ -126,52 +132,44 @@ def load_and_process(uploaded_file):
 def analyze_with_ai(_df, api_key):
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-
-        numeric_cols = _df.select_dtypes(include=[np.number]).columns.tolist()
-        valid_numeric_cols = [col for col in numeric_cols if _df[col].notna().sum() > 0]
-
-        if not valid_numeric_cols:
-            raise ValueError("No hay columnas numéricas válidas para análisis de clustering.")
-
+        
+        # Clusterización
+        numeric_cols = _df.select_dtypes(include=[np.number]).columns
         scaler = StandardScaler()
-        scaled_data = scaler.fit_transform(_df[valid_numeric_cols].fillna(0))
-
-        if np.isnan(scaled_data).any():
-            raise ValueError("El conjunto de datos contiene valores NaN después del escalado.")
-
+        scaled_data = scaler.fit_transform(_df[numeric_cols].fillna(0))
+        
         kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
         _df['Segmento IA'] = kmeans.fit_predict(scaled_data)
-
-        avg_empleados = round(_df['Empleados'].replace(0, np.nan).mean(skipna=True) or 0)
-
+        
+        # Análisis seguro
+        valid_employees = _df[_df['Empleados'] > 0]['Empleados']
+        avg_employees = round(valid_employees.mean()) if not valid_employees.empty else 0
+        
         context = {
             'sectores_top': _df['Sector Industrial'].value_counts().nlargest(5).index.tolist(),
-            'empleados_promedio': avg_empleados,
+            'empleados_promedio': avg_employees,
             'ciudades_clave': _df.groupby('Ciudad')['Segmento IA'].count().nlargest(3).index.tolist()
         }
-
+        
         response = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Eres un experto en marketing digital B2B. Genera recomendaciones basadas en:"
-                },
-                {
-                    "role": "user",
-                    "content": f"{context}\n\nSugiere estrategias segmentadas para Google Ads:"
-                }
-            ],
+            messages=[{
+                "role": "system",
+                "content": "Eres un experto en marketing digital B2B. Genera recomendaciones basadas en:"
+            },{
+                "role": "user",
+                "content": f"{context}\n\nSugiere estrategias segmentadas para Google Ads:"
+            }],
             temperature=0.6,
             max_tokens=600
         )
-
+        
         return {
             'df': _df,
             'analisis': response.choices[0].message.content,
             'sugerencias': context
         }
-
+        
     except Exception as e:
         st.error(f"Error en análisis IA: {str(e)}")
         return None
@@ -180,7 +178,7 @@ def create_interactive_map(df):
     if df.empty:
         st.warning("No hay datos para mostrar")
         return
-
+    
     map_center = [df['Latitud'].mean(), df['Longitud'].mean()]
     with st.spinner("Generando visualización geoespacial..."):
         m = folium.Map(location=map_center, zoom_start=10, tiles='cartodbpositron')
@@ -219,10 +217,11 @@ def main():
         st.session_state.processed_data = None
 
     st.title("🚀 Business Intelligence Suite")
-    st.markdown("Plataforma avanzada de análisis y optimización comercial")
+    st.markdown("Plataforma avanzada de análisis comercial")
 
     with st.expander("⚙ Configuración Avanzada", expanded=False):
-        api_input = st.text_input("Clave API", type="password", help="Requerida para funciones de inteligencia artificial")
+        api_input = st.text_input("Clave API", type="password", 
+                                help="Requerida para funciones de inteligencia artificial")
         if api_input:
             st.session_state.api_key = encrypt_data(api_input)
             st.success("Configuración de seguridad actualizada")
@@ -239,10 +238,10 @@ def main():
                 try:
                     st.write("🔍 Validando estructura del archivo...")
                     df = load_and_process(uploaded_file)
-
+                    
                     st.write("🧠 Ejecutando modelos predictivos...")
                     result = analyze_with_ai(df, st.session_state.api_key)
-
+                    
                     if result:
                         st.session_state.processed_data = result
                         st.session_state.file_id = uploaded_file.file_id
@@ -253,11 +252,11 @@ def main():
 
     if st.session_state.processed_data:
         st.markdown("## 📈 Resultados del Análisis")
-
+        
         with st.container():
             st.markdown("### 🎯 Recomendaciones Estratégicas")
             st.write(st.session_state.processed_data['analisis'])
-
+        
         col1, col2 = st.columns(2)
         with col1:
             selected_sectors = st.multiselect(
@@ -271,18 +270,18 @@ def main():
                 options=st.session_state.processed_data['sugerencias']['ciudades_clave'],
                 default=st.session_state.processed_data['sugerencias']['ciudades_clave']
             )
-
+        
         filtered_df = st.session_state.processed_data['df'][
             (st.session_state.processed_data['df']['Sector Industrial'].isin(selected_sectors)) &
             (st.session_state.processed_data['df']['Ciudad'].isin(selected_cities))
         ]
-
+        
         st.markdown("### 🌍 Mapa de Concentración Comercial")
         create_interactive_map(filtered_df)
-
+        
         st.markdown("## 📤 Exportación de Datos")
         export_format = st.radio("Formato de salida:", ["CSV", "Excel"], horizontal=True)
-
+        
         google_ads_data = prepare_google_ads_data(filtered_df)
         if export_format == "CSV":
             data = google_ads_data.to_csv(index=False).encode('utf-8')
@@ -291,7 +290,7 @@ def main():
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 google_ads_data.to_excel(writer, index=False)
             data = output.getvalue()
-
+        
         st.download_button(
             "Descargar Dataset Optimizado",
             data=data,
