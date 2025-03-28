@@ -3,25 +3,25 @@ import pandas as pd
 import folium
 import requests
 import json
+import re
 from openai import OpenAI
-from io import BytesIO
+from typing import Dict, Optional, List
 from streamlit_folium import st_folium
-from typing import Dict, List, Optional, Tuple
 
-# Configuración de la app
+# ------------------ Configuración de la App ------------------
 st.set_page_config(
     page_title="Katalis Movistar - Prospectador B2B",
     layout="wide",
     page_icon="📡"
 )
 
-# ------------------ Constantes y Configuraciones ------------------
+# ------------------ Constantes ------------------
 DENUE_API_URL = "https://www.inegi.org.mx/app/api/denue/v1/consulta/BuscarAreaActEstr/{entidad}/0/0/0/0/{sector}/0/0/0/0/1/1000/0/{estrato}/{token}"
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 DEFAULT_DESCRIPTION = "Empresas de tecnología en CDMX y EdoMex con +50 empleados"
 TIMEOUT = 30  # segundos
 
-# ------------------ IA: Traductor de descripción a parámetros DENUE ------------------
+# ------------------ Función IA Mejorada ------------------
 def interpretar_prompt_con_ia(descripcion: str, api_key: str) -> Optional[Dict]:
     """Transforma una descripción textual en parámetros estructurados para DENUE usando IA."""
     if not api_key or len(api_key) < 20:
@@ -41,13 +41,14 @@ def interpretar_prompt_con_ia(descripcion: str, api_key: str) -> Optional[Dict]:
 
         "{descripcion}"
 
-        Devuelve un JSON válido como este:
+        Devuelve ÚNICAMENTE un JSON válido como este:
         {{
             "sectores_clae": ["54", "72"],
             "estrato": ["5", "6"],
             "ubicaciones": ["09", "15"],
             "palabras_clave": ["internet", "call center", "servicios digitales"]
         }}
+        No incluyas ningún texto adicional fuera del JSON.
         """
 
         response = client.chat.completions.create(
@@ -62,20 +63,30 @@ def interpretar_prompt_con_ia(descripcion: str, api_key: str) -> Optional[Dict]:
             st.error("No se recibió respuesta de la API")
             return None
             
-        texto = response.choices[0].message.content.strip()
+        texto_respuesta = response.choices[0].message.content.strip()
+        
+        # Limpieza robusta del JSON
         try:
-            # Limpieza robusta del JSON
-            texto_limpio = texto.replace("```json", "").replace("```", "").strip()
+            json_str = re.search(r'```json\s*({.*?})\s*```', texto_respuesta, re.DOTALL)
+            if json_str:
+                texto_limpio = json_str.group(1)
+            else:
+                texto_limpio = texto_respuesta
+                
+            texto_limpio = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', texto_limpio)
+            texto_limpio = re.sub(r'^\s*$\n', '', texto_limpio, flags=re.MULTILINE)
+            
             return json.loads(texto_limpio)
+            
         except json.JSONDecodeError as je:
-            st.error(f"Error decodificando JSON: {je}")
+            st.error(f"Error decodificando JSON. Respuesta cruda: {texto_respuesta[:200]}...")
             return None
             
     except Exception as e:
         st.error(f"❌ Error en la conexión con DeepSeek: {str(e)}")
         return None
 
-# ------------------ DENUE: Solicitud a API optimizada ------------------
+# ------------------ Consulta DENUE Optimizada ------------------
 def consultar_denue(entidad: str, sector: str, estrato: str, token: str) -> pd.DataFrame:
     """Consulta la API DENUE con manejo robusto de errores."""
     try:
@@ -94,7 +105,7 @@ def consultar_denue(entidad: str, sector: str, estrato: str, token: str) -> pd.D
             "Dirección": f"{e[8]} {e[9]}, {e[11]}, {e[13]}",
             "Latitud": float(e[19]),
             "Longitud": float(e[18])
-        } for e in response.json() if len(e) > 19]  # Validación de campos
+        } for e in response.json() if len(e) > 19]
         
         return pd.DataFrame(empresas)
     
@@ -105,7 +116,7 @@ def consultar_denue(entidad: str, sector: str, estrato: str, token: str) -> pd.D
         st.error(f"❌ Error procesando datos de DENUE: {str(e)}")
         return pd.DataFrame()
 
-# ------------------ Visualización optimizada ------------------
+# ------------------ Visualización Mejorada ------------------
 def mapa_empresas(df: pd.DataFrame) -> None:
     """Muestra un mapa interactivo con las empresas encontradas."""
     if df.empty:
@@ -113,7 +124,6 @@ def mapa_empresas(df: pd.DataFrame) -> None:
         return
     
     try:
-        # Calcular centro del mapa
         avg_lat = df['Latitud'].mean()
         avg_lon = df['Longitud'].mean()
         
@@ -123,7 +133,6 @@ def mapa_empresas(df: pd.DataFrame) -> None:
             tiles='cartodbpositron'
         )
         
-        # Agrupación de marcadores para mejor rendimiento
         marker_cluster = folium.plugins.MarkerCluster().add_to(mapa)
         
         for _, row in df.iterrows():
@@ -143,12 +152,12 @@ def mapa_empresas(df: pd.DataFrame) -> None:
     except Exception as e:
         st.error(f"❌ Error generando el mapa: {str(e)}")
 
-# ------------------ Streamlit UI ------------------
+# ------------------ Interfaz Principal ------------------
 def main():
     st.title("🧠 Asistente Comercial Inteligente")
     st.markdown("Encuentra a tus prospectos ideales usando IA + datos oficiales DENUE")
 
-    # Sidebar con configuración
+    # Sidebar
     with st.sidebar:
         st.header("🔐 Configuración")
         denue_token = st.text_input("Token de DENUE", type="password", help="Obtenlo en https://www.inegi.org.mx/servicios/api_denue.html")
@@ -177,13 +186,13 @@ def main():
         with st.expander("Ver parámetros generados"):
             st.json(parametros)
 
-        # Validar parámetros recibidos
+        # Validación de parámetros
         required_keys = ['sectores_clae', 'estrato', 'ubicaciones']
         if not all(key in parametros for key in required_keys):
             st.error("Los parámetros generados no tienen el formato correcto")
             return
 
-        # Procesamiento en lotes con feedback visual
+        # Búsqueda en DENUE
         progress_bar = st.progress(0)
         status_text = st.empty()
         total_df = pd.DataFrame()
