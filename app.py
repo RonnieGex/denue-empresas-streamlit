@@ -64,7 +64,6 @@ def load_and_process(uploaded_file):
     progress = st.progress(0, text="Iniciando procesamiento...")
     
     try:
-        # Lectura adaptativa para grandes datasets
         progress.progress(10, "Leyendo archivo...")
         if uploaded_file.name.endswith('.csv'):
             chunks = pd.read_csv(
@@ -77,11 +76,9 @@ def load_and_process(uploaded_file):
         else:
             df = pd.read_excel(uploaded_file, engine='openpyxl')
 
-        # Normalización avanzada
         progress.progress(30, "Estandarizando datos...")
         df.columns = [normalize_column_name(col) for col in df.columns]
         
-        # Mapeo dinámico de columnas
         rename_mapping = {}
         for target_col, possible_cols in REQUIRED_COLUMNS.items():
             for col in possible_cols:
@@ -90,14 +87,12 @@ def load_and_process(uploaded_file):
         df = df.rename(columns=rename_mapping)
         df = df.rename(columns=COLUMN_NAMES_MAP)
 
-        # Validación mejorada
         required = list(COLUMN_NAMES_MAP.values())
         missing = [col for col in required if col not in df.columns]
         if missing:
             st.error(f"Columnas requeridas faltantes: {', '.join(missing)}")
             st.stop()
 
-        # Conversión segura a numérico
         progress.progress(50, "Procesando empleados...")
         df['Empleados'] = pd.to_numeric(df['Empleados'], errors='coerce')
         df['Tamaño Empresa'] = np.select(
@@ -110,7 +105,6 @@ def load_and_process(uploaded_file):
             default='Desconocido'
         )
 
-        # Optimización de memoria
         dtypes = {
             'Latitud': 'float32',
             'Longitud': 'float32',
@@ -119,7 +113,6 @@ def load_and_process(uploaded_file):
         }
         df = df.astype(dtypes, errors='ignore')
 
-        # Limpieza final
         progress.progress(80, "Depurando datos...")
         df = df.dropna(subset=['Estado', 'Ciudad', 'Sector Industrial'])
         
@@ -136,41 +129,50 @@ def analyze_with_ai(_df, api_key):
     """Análisis predictivo con DeepSeek AI"""
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-        
-        # Clusterización avanzada
-        numeric_cols = _df.select_dtypes(include=[np.number]).columns
+
+        numeric_cols = _df.select_dtypes(include=[np.number]).columns.tolist()
+        valid_numeric_cols = [col for col in numeric_cols if _df[col].notna().sum() > 0]
+
+        if not valid_numeric_cols:
+            raise ValueError("No hay columnas numéricas válidas para análisis de clustering.")
+
         scaler = StandardScaler()
-        scaled_data = scaler.fit_transform(_df[numeric_cols].fillna(0))
-        
+        scaled_data = scaler.fit_transform(_df[valid_numeric_cols].fillna(0))
+
+        if np.isnan(scaled_data).any():
+            raise ValueError("El conjunto de datos contiene valores NaN después del escalado.")
+
         kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
         _df['Segmento IA'] = kmeans.fit_predict(scaled_data)
-        
-        # Generación de recomendaciones
+
         context = {
             'sectores_top': _df['Sector Industrial'].value_counts().nlargest(5).index.tolist(),
-            'empleados_promedio': round(_df['Empleados'].mean()),
+            'empleados_promedio': round(_df['Empleados'].mean(skipna=True)),
             'ciudades_clave': _df.groupby('Ciudad')['Segmento IA'].count().nlargest(3).index.tolist()
         }
-        
+
         response = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[{
-                "role": "system",
-                "content": "Eres un experto en marketing digital B2B. Genera recomendaciones basadas en:"
-            },{
-                "role": "user",
-                "content": f"{context}\n\nSugiere estrategias segmentadas para Google Ads:"
-            }],
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Eres un experto en marketing digital B2B. Genera recomendaciones basadas en:"
+                },
+                {
+                    "role": "user",
+                    "content": f"{context}\n\nSugiere estrategias segmentadas para Google Ads:"
+                }
+            ],
             temperature=0.6,
             max_tokens=600
         )
-        
+
         return {
             'df': _df,
             'analisis': response.choices[0].message.content,
             'sugerencias': context
         }
-        
+
     except Exception as e:
         st.error(f"Error en análisis IA: {str(e)}")
         return None
@@ -214,17 +216,14 @@ def prepare_google_ads_data(df):
     }).dropna()
 
 def main():
-    # Gestión de estado de sesión
     if 'api_key' not in st.session_state:
         st.session_state.api_key = None
     if 'processed_data' not in st.session_state:
         st.session_state.processed_data = None
 
-    # Interfaz profesional
     st.title("🚀 Business Intelligence Suite")
     st.markdown("Plataforma avanzada de análisis y optimización comercial")
 
-    # Configuración de API segura
     with st.expander("⚙ Configuración Avanzada", expanded=False):
         api_input = st.text_input("Clave API", type="password", 
                                 help="Requerida para funciones de inteligencia artificial")
@@ -232,14 +231,12 @@ def main():
             st.session_state.api_key = encrypt_data(api_input)
             st.success("Configuración de seguridad actualizada")
 
-    # Carga de archivo mejorada
     uploaded_file = st.file_uploader(
         "Cargar base de empresas (CSV/Excel)",
         type=["csv", "xlsx"],
         help="Formatos soportados: CSV, Excel (hasta 500MB)"
     )
 
-    # Procesamiento con IA
     if uploaded_file and st.session_state.api_key:
         if st.session_state.processed_data is None or uploaded_file.file_id != st.session_state.get('file_id'):
             with st.status("Analizando datos...", expanded=True) as status:
@@ -258,7 +255,6 @@ def main():
                     st.error(f"Error en el procesamiento: {str(e)}")
                     st.session_state.processed_data = None
 
-    # Visualización de resultados
     if st.session_state.processed_data:
         st.markdown("## 📈 Resultados del Análisis")
         
@@ -266,7 +262,6 @@ def main():
             st.markdown("### 🎯 Recomendaciones Estratégicas")
             st.write(st.session_state.processed_data['analisis'])
         
-        # Filtros interactivos
         col1, col2 = st.columns(2)
         with col1:
             selected_sectors = st.multiselect(
@@ -281,17 +276,14 @@ def main():
                 default=st.session_state.processed_data['sugerencias']['ciudades_clave']
             )
         
-        # Aplicación de filtros
         filtered_df = st.session_state.processed_data['df'][
             (st.session_state.processed_data['df']['Sector Industrial'].isin(selected_sectors)) &
             (st.session_state.processed_data['df']['Ciudad'].isin(selected_cities))
         ]
         
-        # Visualización geoespacial
         st.markdown("### 🌍 Mapa de Concentración Comercial")
         create_interactive_map(filtered_df)
         
-        # Exportación profesional
         st.markdown("## 📤 Exportación de Datos")
         export_format = st.radio("Formato de salida:", ["CSV", "Excel"], horizontal=True)
         
