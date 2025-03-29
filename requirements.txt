@@ -1,7 +1,19 @@
-streamlit
-pandas
-folium
-streamlit-folium
-openai
-anthropic
-plotly
+# Core
+streamlit==1.32.2
+pandas==2.2.1
+numpy==1.26.4
+
+# Visualización
+plotly==5.18.0
+folium==0.15.1
+streamlit-folium==0.17.0
+
+# IA/ML
+openai==1.12.0
+
+# Procesamiento de datos
+openpyxl==3.1.2  # Para soporte de Excel
+python-dotenv==1.0.1  # Manejo de API keys
+
+# Optimización de memoria
+pyarrow==14.0.2  # Mejor rendimiento con pandas
