@@ -2,18 +2,23 @@
 streamlit==1.32.2
 pandas==2.2.1
 numpy==1.26.4
+redis==4.6.0
 
 # Visualización
 plotly==5.18.0
 folium==0.15.1
 streamlit-folium==0.17.0
+matplotlib==3.8.2
 
 # IA/ML
 openai==1.12.0
 
-# Procesamiento de datos
-openpyxl==3.1.2  # Para soporte de Excel
-python-dotenv==1.0.1  # Manejo de API keys
+# Procesamiento
+asyncio==3.4.3
+python-dotenv==1.0.1
+pyarrow==14.0.2
+openpyxl==3.1.2
 
-# Optimización de memoria
-pyarrow==14.0.2  # Mejor rendimiento con pandas
+# Validación
+phonenumbers==8.13.22
+email-validator==2.0.0.post2
