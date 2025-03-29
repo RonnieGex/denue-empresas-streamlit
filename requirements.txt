@@ -2,7 +2,6 @@
 streamlit==1.32.2
 pandas==2.2.1
 numpy==1.26.4
-redis==4.6.0
 
 # Visualización
 plotly==5.18.0
@@ -20,5 +19,4 @@ pyarrow==14.0.2
 openpyxl==3.1.2
 
 # Validación
-phonenumbers==8.13.22
 email-validator==2.0.0.post2
